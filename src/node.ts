@@ -50,8 +50,12 @@ function parseCli(argv: string[]): CliOpts {
     compressReminders: envFlag('COMPRESS_REMINDERS', true),
     compressToolResults: envFlag('COMPRESS_TOOL_RESULTS', true),
     minCompressChars: Number(process.env.MIN_COMPRESS_CHARS ?? 2000),
-    minReminderChars: Number(process.env.MIN_REMINDER_CHARS ?? 1000),
-    minToolResultChars: Number(process.env.MIN_TOOL_RESULT_CHARS ?? 2000),
+    // Raised to 10,000 — the per-block break-even point at the current
+    // renderer config (Unifont 10px, cell 5×11, 100 cols). The real gate
+    // is `isCompressionProfitable()` in transform.ts; this is just a
+    // fast-path skip for the obvious-no cases. Keep in sync with DEFAULTS.
+    minReminderChars: Number(process.env.MIN_REMINDER_CHARS ?? 10000),
+    minToolResultChars: Number(process.env.MIN_TOOL_RESULT_CHARS ?? 10000),
     placement: (process.env.PLACEMENT as 'system' | 'user') ?? 'user',
     cols: Number(process.env.COLS ?? 100),
     track: envFlag('PIXELPIPE_TRACK', true),
@@ -107,8 +111,8 @@ Options:
       --no-reminders      don't image-compress <system-reminder> blocks
       --no-tool-results   don't image-compress large tool_result content
       --min-chars <N>     skip system compression below this many chars (default 2000)
-      --min-reminder-chars <N>  per-block threshold for --no-reminders (default 1000)
-      --min-tool-result-chars <N>  per-block threshold for --no-tool-results (default 2000)
+      --min-reminder-chars <N>  per-block fast-skip threshold for reminders (default 10000)
+      --min-tool-result-chars <N>  per-block fast-skip threshold for tool_results (default 10000)
       --placement <where> 'system' or 'user' (default user; 'system' is
                           rejected by the API for image blocks)
       --cols <N>          soft-wrap column count (default 100)

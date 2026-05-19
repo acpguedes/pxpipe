@@ -48,6 +48,11 @@ export interface TrackEvent {
    *  identify which Unicode blocks to add to the atlas profile without
    *  having to capture & inspect the request body. */
   dropped_codepoints_top?: Record<string, number>;
+  /** Counters for blocks that DIDN'T get image-compressed this request. Lets
+   *  the operator tune the break-even threshold and spot if the
+   *  not-profitable bucket grows (= renderer-config change needed). Only
+   *  emitted when at least one counter > 0. */
+  passthrough_reasons?: { below_threshold?: number; not_profitable?: number };
   /** Tag names found in the static slab we don't recognize. Canary for
    *  Claude Code releases that add new dynamic tags. */
   unknown_static_tags?: string[];
@@ -150,6 +155,12 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     }
     if (info.droppedCodepointsTop && Object.keys(info.droppedCodepointsTop).length > 0) {
       out.dropped_codepoints_top = info.droppedCodepointsTop;
+    }
+    if (info.passthroughReasons) {
+      const pr = info.passthroughReasons;
+      if ((pr.below_threshold ?? 0) > 0 || (pr.not_profitable ?? 0) > 0) {
+        out.passthrough_reasons = pr;
+      }
     }
     if (info.unknownStaticTags && info.unknownStaticTags.length > 0)
       out.unknown_static_tags = info.unknownStaticTags;

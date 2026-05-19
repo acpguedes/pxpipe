@@ -59,20 +59,69 @@ const DEFAULTS: Required<TransformOptions> = {
   compressReminders: true,
   compressToolResults: true,
   minCompressChars: 2000,
-  // RAISED from Python defaults (1000 / 2000) per history-researcher's
-  // round-3 measurement: Anthropic's real per-image cost is ~2,500 tokens,
-  // not ~190 as our old dashboard formula suggested. At the real rate,
-  // text blocks under ~10,000 chars cost more as images than as text. We
-  // raise the per-block thresholds to keep small blocks as text. See
-  // /tmp/pixelpipe-history-compression.md for the N=33 cold-miss analysis.
-  minReminderChars: 2000,
-  minToolResultChars: 5000,
+  // Coarse pre-filter — blocks below this length skip the per-block
+  // break-even check entirely (saves CPU on the obviously-not-profitable
+  // cases). The REAL gate is `isCompressionProfitable()` below; this is
+  // just a fast-path skip. Set to 10,000 (= break-even point at the
+  // current cell config) so anything below it can't possibly net-save.
+  minReminderChars: 10000,
+  minToolResultChars: 10000,
   // Anthropic's `system` field accepts text blocks only — image blocks there
   // come back as `400 system.N.type: Input should be 'text'`. Images must go
   // into a user message instead.
   placement: 'user',
   cols: 100,
 };
+
+// --- per-block break-even check ---
+//
+// Anthropic's real per-image cost is ~2,500 tokens (history-researcher's
+// round-3 N=33 measurement). Compressing a text block to an image is only
+// profitable when the text would have cost MORE than `ceil(textLen / chars-
+// per-image) × tokens-per-image` tokens. For small blocks, this is a NET
+// LOSS — image cost dominates — and we should leave them as text.
+//
+// Production bug context (2026-05-19): a request with orig_chars=169k spread
+// across 88 small blocks each cost ~2,500 tokens as images = 220k tokens
+// when the text would have been only 42k tokens. The flat per-block-min
+// threshold (5k) was wide of the break-even point (10k) and let net-loss
+// compressions through. The check below is the real gate.
+
+/** Characters per rendered image at the current renderer config. Derived
+ *  from `cols × floor((MAX_HEIGHT_PX − 2·PAD_Y) / cell_height)` with the
+ *  shipping values (cols=100, cell=5×11, MAX=1568, PAD=4):
+ *     100 × floor(1560 / 11) = 100 × 141 = 14,100
+ *  Re-derive if cell dimensions or column count ever change. */
+const CHARS_PER_IMAGE = 14_100;
+
+/** English ~4 chars per token average. Holds well enough for code + prose
+ *  mix; tool_result content is typically code-shaped. */
+const CHARS_PER_TOKEN = 4;
+
+/** Empirical per-image cost (see dashboard.ts comment for the measurement
+ *  trace). Kept here as a constant rather than imported from dashboard.ts
+ *  to keep `src/core/` free of dashboard imports — that's a one-way edge. */
+const TOKENS_PER_IMAGE = 2500;
+
+/** Returns true iff image-compressing a text block of `textLen` chars would
+ *  actually save tokens vs leaving it as text. Used as the gate before every
+ *  image-encoding decision in transformRequest. */
+export function isCompressionProfitable(textLen: number): boolean {
+  const estImages = Math.max(1, Math.ceil(textLen / CHARS_PER_IMAGE));
+  const imageTokensCost = estImages * TOKENS_PER_IMAGE;
+  const textTokensEquivalent = textLen / CHARS_PER_TOKEN;
+  return imageTokensCost < textTokensEquivalent;
+}
+
+/** Increment a passthrough-reason counter on `info`. Lazily allocates the
+ *  `passthroughReasons` sub-object so happy-path events stay lean. */
+function bumpPassthrough(
+  info: TransformInfo,
+  reason: 'below_threshold' | 'not_profitable',
+): void {
+  if (!info.passthroughReasons) info.passthroughReasons = {};
+  info.passthroughReasons[reason] = (info.passthroughReasons[reason] ?? 0) + 1;
+}
 
 /** Parsed contents of Claude Code's <env> + git status blocks. All optional —
  *  fields are only populated if the corresponding line is present. */
@@ -139,6 +188,14 @@ export interface TransformInfo {
    *  identify which Unicode blocks to add to the atlas profile without
    *  having to capture & inspect the request body. */
   droppedCodepointsTop?: Record<string, number>;
+  /** Counters for why blocks didn't get image-compressed this request.
+   *  Helps tune the break-even check vs the flat threshold:
+   *    - `below_threshold`: block below `minReminderChars` / `minToolResultChars`
+   *      (the fast-path skip; saves CPU on obvious-no cases)
+   *    - `not_profitable`: block above the threshold but `isCompressionProfitable`
+   *      returned false (image cost ≥ text cost at current cell config)
+   *  Only emitted when at least one counter is > 0. */
+  passthroughReasons?: { below_threshold?: number; not_profitable?: number };
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -762,6 +819,16 @@ export async function transformRequest(
     return { body, info };
   }
 
+  // Per-block break-even check applied to the static slab too. The slab is
+  // usually 25-30 KB so it always passes (1 image @ 2500 tokens < 25000/4 =
+  // 6250 text-equivalent tokens), but the check guards against the edge
+  // case where a tiny tool docs + tiny static slab combine to <10k chars.
+  if (!isCompressionProfitable(combined.length)) {
+    info.reason = `not_profitable (slab=${combined.length} chars)`;
+    bumpPassthrough(info, 'not_profitable');
+    return { body, info };
+  }
+
   // 3. Render to one or more PNGs.
   const images = await renderTextToPngs(combined, o.cols);
   const imageBlocks: ImageBlock[] = [];
@@ -834,27 +901,39 @@ export async function transformRequest(
       const processedExisting: ContentBlock[] = [];
       if (o.compressReminders) {
         for (const blk of existing) {
-          if (
+          const isReminderText =
             blk &&
             (blk as TextBlock).type === 'text' &&
             typeof (blk as TextBlock).text === 'string' &&
-            (blk as TextBlock).text.trimStart().startsWith('<system-reminder>') &&
-            (blk as TextBlock).text.length >= o.minReminderChars
-          ) {
-            const { blocks: imgs, droppedChars, droppedCodepoints: dcp } =
-              await textToImageBlocks((blk as TextBlock).text, o.cols);
-            for (const img of imgs) {
-              processedExisting.push(img);
-              info.imageBytes += approxBlockBytes(img);
-            }
-            info.reminderImgs = (info.reminderImgs ?? 0) + imgs.length;
-            info.imageCount += imgs.length;
-            info.droppedChars = (info.droppedChars ?? 0) + droppedChars;
-            for (const [cp, n] of dcp) {
-              droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
-            }
-          } else {
+            (blk as TextBlock).text.trimStart().startsWith('<system-reminder>');
+          if (!isReminderText) {
             processedExisting.push(blk);
+            continue;
+          }
+          const textLen = (blk as TextBlock).text.length;
+          if (textLen < o.minReminderChars) {
+            // Below coarse threshold; can't possibly be profitable. Skip.
+            bumpPassthrough(info, 'below_threshold');
+            processedExisting.push(blk);
+            continue;
+          }
+          if (!isCompressionProfitable(textLen)) {
+            // Above threshold but image cost ≥ text cost. Net loss to compress.
+            bumpPassthrough(info, 'not_profitable');
+            processedExisting.push(blk);
+            continue;
+          }
+          const { blocks: imgs, droppedChars, droppedCodepoints: dcp } =
+            await textToImageBlocks((blk as TextBlock).text, o.cols);
+          for (const img of imgs) {
+            processedExisting.push(img);
+            info.imageBytes += approxBlockBytes(img);
+          }
+          info.reminderImgs = (info.reminderImgs ?? 0) + imgs.length;
+          info.imageCount += imgs.length;
+          info.droppedChars = (info.droppedChars ?? 0) + droppedChars;
+          for (const [cp, n] of dcp) {
+            droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
           }
         }
       } else {
@@ -893,44 +972,62 @@ export async function transformRequest(
               continue;
             }
             const inner = tr.content;
-            if (typeof inner === 'string' && inner.length >= o.minToolResultChars) {
-              const { blocks: imgs, droppedChars, droppedCodepoints: dcp } =
-                await textToImageBlocks(inner, o.cols);
-              for (const img of imgs) info.imageBytes += approxBlockBytes(img);
-              info.toolResultImgs = (info.toolResultImgs ?? 0) + imgs.length;
-              info.imageCount += imgs.length;
-              info.droppedChars = (info.droppedChars ?? 0) + droppedChars;
-              for (const [cp, n] of dcp) {
-                droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
+            if (typeof inner === 'string') {
+              if (inner.length < o.minToolResultChars) {
+                bumpPassthrough(info, 'below_threshold');
+                rewritten.push(blk);
+              } else if (!isCompressionProfitable(inner.length)) {
+                bumpPassthrough(info, 'not_profitable');
+                rewritten.push(blk);
+              } else {
+                const { blocks: imgs, droppedChars, droppedCodepoints: dcp } =
+                  await textToImageBlocks(inner, o.cols);
+                for (const img of imgs) info.imageBytes += approxBlockBytes(img);
+                info.toolResultImgs = (info.toolResultImgs ?? 0) + imgs.length;
+                info.imageCount += imgs.length;
+                info.droppedChars = (info.droppedChars ?? 0) + droppedChars;
+                for (const [cp, n] of dcp) {
+                  droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
+                }
+                rewritten.push({ ...tr, content: imgs });
+                changed = true;
               }
-              rewritten.push({ ...tr, content: imgs });
-              changed = true;
             } else if (Array.isArray(inner)) {
               const newInner: Array<TextBlock | ImageBlock> = [];
               let innerChanged = false;
               for (const ib of inner) {
-                if (
+                const isTextBlock =
                   ib &&
                   (ib as TextBlock).type === 'text' &&
-                  typeof (ib as TextBlock).text === 'string' &&
-                  (ib as TextBlock).text.length >= o.minToolResultChars
-                ) {
-                  const { blocks: imgs, droppedChars, droppedCodepoints: dcp } =
-                    await textToImageBlocks((ib as TextBlock).text, o.cols);
-                  for (const img of imgs) {
-                    newInner.push(img);
-                    info.imageBytes += approxBlockBytes(img);
-                  }
-                  info.toolResultImgs = (info.toolResultImgs ?? 0) + imgs.length;
-                  info.imageCount += imgs.length;
-                  info.droppedChars = (info.droppedChars ?? 0) + droppedChars;
-                  for (const [cp, n] of dcp) {
-                    droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
-                  }
-                  innerChanged = true;
-                } else {
+                  typeof (ib as TextBlock).text === 'string';
+                if (!isTextBlock) {
                   newInner.push(ib as TextBlock | ImageBlock);
+                  continue;
                 }
+                const innerText = (ib as TextBlock).text;
+                if (innerText.length < o.minToolResultChars) {
+                  bumpPassthrough(info, 'below_threshold');
+                  newInner.push(ib as TextBlock | ImageBlock);
+                  continue;
+                }
+                if (!isCompressionProfitable(innerText.length)) {
+                  bumpPassthrough(info, 'not_profitable');
+                  newInner.push(ib as TextBlock | ImageBlock);
+                  continue;
+                }
+                const { blocks: imgs, droppedChars, droppedCodepoints: dcp } =
+                  await textToImageBlocks(innerText, o.cols);
+                for (const img of imgs) {
+                  newInner.push(img);
+                  info.imageBytes += approxBlockBytes(img);
+                }
+                info.toolResultImgs = (info.toolResultImgs ?? 0) + imgs.length;
+                info.imageCount += imgs.length;
+                info.droppedChars = (info.droppedChars ?? 0) + droppedChars;
+                for (const [cp, n] of dcp) {
+                  droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
+                }
+                innerChanged = true;
               }
               if (innerChanged) {
                 rewritten.push({ ...tr, content: newInner });

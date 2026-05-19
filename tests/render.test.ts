@@ -6,7 +6,7 @@ import {
   minifyForRender,
 } from '../src/core/render.js';
 import { encodeGrayPng, bytesToBase64 } from '../src/core/png.js';
-import { transformRequest } from '../src/core/transform.js';
+import { transformRequest, isCompressionProfitable } from '../src/core/transform.js';
 import {
   atlasRank,
   ATLAS_CELL_H,
@@ -418,7 +418,7 @@ describe('transform', () => {
   });
 
   it('compresses large system fields into image blocks', async () => {
-    const bigSystem = 'You are a helpful assistant. '.repeat(200);
+    const bigSystem = 'You are a helpful assistant. '.repeat(1100); // ~31.9k chars, well past 2-image break-even (20k)
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
       messages: [{ role: 'user', content: 'hi' }],
@@ -451,7 +451,9 @@ describe('transform', () => {
       tools: [
         {
           name: 'BigTool',
-          description: 'A very long tool description. '.repeat(100),
+          // Long enough to push the combined slab past the 2-image break-even
+          // (20k chars). 'A very long tool description. ' = 30 chars × 1100 = 33k.
+          description: 'A very long tool description. '.repeat(1100),
           input_schema: { type: 'object', properties: { x: { type: 'string' } } },
         },
       ],
@@ -475,7 +477,7 @@ describe('transform', () => {
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
       messages: [{ role: 'user', content: 'hi' }],
-      system: 'x'.repeat(3000), // force compression
+      system: 'x'.repeat(40000), // force compression
       tools: [
         {
           name: 'Read',
@@ -570,7 +572,7 @@ describe('transform', () => {
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
       messages: [{ role: 'user', content: 'hi' }],
-      system: 'x'.repeat(3000),
+      system: 'x'.repeat(40000),
       tools: [
         { name: 'NoSchema', description: 'd', input_schema: { type: 'object' } },
       ],
@@ -586,7 +588,7 @@ describe('transform', () => {
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
       messages: [{ role: 'user', content: 'hi' }],
-      system: 'x'.repeat(3000),
+      system: 'x'.repeat(40000),
       tools: [{ name: 'Bare', description: 'd' }],
     });
     const { body } = await transformRequest(new TextEncoder().encode(req));
@@ -604,7 +606,7 @@ describe('transform', () => {
       const req = JSON.stringify({
         model: 'claude-3-5-sonnet',
         messages: [{ role: 'user', content: 'hi' }],
-        system: 'x'.repeat(3000),
+        system: 'x'.repeat(40000),
         tools: [{ name: 'T', description: 'd', input_schema: toolSchema }],
       });
       const { body } = await transformRequest(new TextEncoder().encode(req));
@@ -904,7 +906,7 @@ describe('transform', () => {
       const req = JSON.stringify({
         model: 'claude-3-5-sonnet',
         messages: [{ role: 'user', content: 'hi' }],
-        system: 'x'.repeat(3000),
+        system: 'x'.repeat(40000),
         tools: [
           {
             name: 'UnionTool',
@@ -962,7 +964,7 @@ describe('transform', () => {
   });
 
   it('strips x-anthropic-billing-header line and keeps it as text', async () => {
-    const sysText = 'x-anthropic-billing-header: cch=abc123\n' + 'real prompt text. '.repeat(200);
+    const sysText = 'x-anthropic-billing-header: cch=abc123\n' + 'real prompt text. '.repeat(2500);
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
       messages: [{ role: 'user', content: 'hi' }],
@@ -978,7 +980,7 @@ describe('transform', () => {
   });
 
   it('keeps <env> as text outside the image so cache_control stays stable', async () => {
-    const staticSlab = 'claude.md ground truth.\n'.repeat(500);
+    const staticSlab = 'claude.md ground truth.\n'.repeat(2200);
     const envBlock =
       "<env>\nWorking directory: /tmp/parityproj\nIs directory a git repo: Yes\nPlatform: darwin\nToday's date: 2026-05-18\n</env>";
     const sys = staticSlab + '\n' + envBlock;
@@ -1023,7 +1025,7 @@ describe('transform', () => {
 
   it('puts cache_control on the image only, never on the dynamic tail', async () => {
     const sys =
-      'claude.md\n'.repeat(500) +
+      'claude.md\n'.repeat(5000) +
       '<env>\nWorking directory: /tmp/x\n</env>\n' +
       '<context name="todoList">\n[ ] do thing\n</context>';
     const body = new TextEncoder().encode(
@@ -1131,7 +1133,7 @@ describe('transform', () => {
     // The whole token-savings story collapses if the renderer is non-
     // deterministic, because identical system prompts on consecutive turns
     // would produce different image bytes → 0% cache hit. Guard rail.
-    const sys = 'claude.md\n'.repeat(500);
+    const sys = 'claude.md\n'.repeat(5000);
     const body = new TextEncoder().encode(
       JSON.stringify({
         model: 'claude',
@@ -1236,7 +1238,7 @@ describe('transform', () => {
       JSON.stringify({
         model: 'claude',
         messages: [{ role: 'user', content: 'hi' }],
-        system: 'claude.md\n'.repeat(500),
+        system: 'claude.md\n'.repeat(5000),
       }),
     );
     const { body: outBytes } = await transformRequest(body);
@@ -1251,7 +1253,9 @@ describe('transform', () => {
   });
 
   it('compresses long <system-reminder> blocks in the first user message', async () => {
-    const reminder = '<system-reminder>\n' + 'a long policy note. '.repeat(200) + '\n</system-reminder>';
+    // 'a long policy note. ' = 20 chars. 600× = 12k chars + reminder tags
+    // — past the 10k minReminderChars threshold AND past 1-image break-even.
+    const reminder = '<system-reminder>\n' + 'a long policy note. '.repeat(600) + '\n</system-reminder>';
     const body = new TextEncoder().encode(
       JSON.stringify({
         model: 'claude',
@@ -1264,7 +1268,7 @@ describe('transform', () => {
             ],
           },
         ],
-        system: 'claude.md\n'.repeat(500),
+        system: 'claude.md\n'.repeat(5000),
       }),
     );
     const { body: outBytes, info } = await transformRequest(body);
@@ -1299,7 +1303,7 @@ describe('transform', () => {
             content: [{ type: 'text', text: shortReminder }],
           },
         ],
-        system: 'claude.md\n'.repeat(500),
+        system: 'claude.md\n'.repeat(5000),
       }),
     );
     const { body: outBytes, info } = await transformRequest(body);
@@ -1313,7 +1317,9 @@ describe('transform', () => {
   });
 
   it('compresses large tool_result text content across user messages', async () => {
-    const bigResult = 'output line. '.repeat(500);
+    // 'output line. ' = 13 chars × 1000 = 13k chars — past minToolResultChars
+    // (10k) AND past 1-image break-even (also 10k).
+    const bigResult = 'output line. '.repeat(1000);
     const body = new TextEncoder().encode(
       JSON.stringify({
         model: 'claude',
@@ -1329,7 +1335,7 @@ describe('transform', () => {
             ],
           },
         ],
-        system: 'claude.md\n'.repeat(500),
+        system: 'claude.md\n'.repeat(5000),
       }),
     );
     const { body: outBytes, info } = await transformRequest(body);
@@ -1347,7 +1353,7 @@ describe('transform', () => {
   });
 
   it('leaves is_error tool_results untouched (Anthropic forbids images there)', async () => {
-    const bigResult = 'error trace. '.repeat(500);
+    const bigResult = 'error trace. '.repeat(1000); // 13k chars — past 10k break-even
     const body = new TextEncoder().encode(
       JSON.stringify({
         model: 'claude',
@@ -1364,7 +1370,7 @@ describe('transform', () => {
             ],
           },
         ],
-        system: 'claude.md\n'.repeat(500),
+        system: 'claude.md\n'.repeat(5000),
       }),
     );
     const { body: outBytes, info } = await transformRequest(body);
@@ -1389,7 +1395,7 @@ describe('transform', () => {
     const cpB = String.fromCodePoint(0x1f604); // 😄
     const cpC = String.fromCodePoint(0x1f60a); // 😊
     const sys =
-      'x'.repeat(3000) + // bulk to force compression
+      'x'.repeat(40000) + // bulk to force compression
       '\n' + cpA.repeat(10) +  // 10 drops of U+1F600
       '\n' + cpB.repeat(3) +   // 3  drops of U+1F604
       '\n' + cpC.repeat(1);    // 1  drop  of U+1F60A
@@ -1421,7 +1427,7 @@ describe('transform', () => {
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
       messages: [{ role: 'user', content: 'hi' }],
-      system: 'x'.repeat(3000),
+      system: 'x'.repeat(40000),
     });
     const { info } = await transformRequest(new TextEncoder().encode(req));
     expect(info.compressed).toBe(true);
@@ -1432,7 +1438,7 @@ describe('transform', () => {
   it('caps droppedCodepointsTop at 20 entries', async () => {
     // 25 distinct supplementary-plane codepoints, each appearing N times so
     // we can verify the cap drops the smallest counts.
-    let payload = 'x'.repeat(3000) + '\n';
+    let payload = 'x'.repeat(40000) + '\n';
     for (let i = 0; i < 25; i++) {
       // U+1F300..U+1F318 — 25 distinct codepoints, each occurring (25 - i) times
       // so U+1F300 occurs 25 times, U+1F318 occurs 1 time.
@@ -1457,21 +1463,48 @@ describe('transform', () => {
     expect(top['U+1F300']).toBe(25);
   });
 
-  // --- Threshold raise (task #35) -------------------------------------------
-  // history-researcher's round-3 analysis (N=33 cold-miss events from
-  // events.jsonl, 2026-05-18 — see /tmp/pixelpipe-history-compression.md)
-  // measured Anthropic's real per-image cost at ~2,500 tokens, vs our prior
-  // dashboard estimate of ~190. At the real rate, text blocks under ~10k
-  // chars cost more as images than as text. We raise the default
-  // per-block thresholds (reminder 1000→2000, tool_result 2000→5000) so
-  // small blocks stay as text. These tests assert the new behavior at the
-  // default thresholds and prove the boundary still trips on real inputs.
+  // --- Per-block break-even gate (URGENT slice, supersedes prior threshold tests) ---
+  // history-researcher's round-3 analysis measured Anthropic's real per-image
+  // cost at ~2,500 tokens. At the current renderer config (14,100 chars/image)
+  // the break-even point is 10,000 chars per image. Blocks shorter than that
+  // cost MORE as images than as text. The fix: gate every per-block image
+  // encoding on `isCompressionProfitable()` which checks
+  //   ceil(textLen / 14100) * 2500 < textLen / 4
+  // Tests below confirm the function math AND that the gates correctly skip
+  // net-loss compressions in the full pipeline.
 
-  it('threshold raise: 3000-char tool_result stays as text (was: imaged)', async () => {
-    // 3000-char tool_result block. PRE-CHANGE: was 2000 cutoff, would
-    // image. POST-CHANGE: 5000 cutoff, stays as text. The tool_result_imgs
-    // counter should NOT increment.
-    const longResult = 'x'.repeat(3000);
+  it('isCompressionProfitable: false at 5000 chars (1 image @ 2500 > 1250 text)', () => {
+    expect(isCompressionProfitable(5000)).toBe(false);
+  });
+
+  it('isCompressionProfitable: false at 10000 chars (1 image @ 2500 == 2500 text — strict <)', () => {
+    expect(isCompressionProfitable(10000)).toBe(false);
+  });
+
+  it('isCompressionProfitable: true at 10001 chars (tiny win past break-even)', () => {
+    expect(isCompressionProfitable(10001)).toBe(true);
+  });
+
+  it('isCompressionProfitable: true at 14000 chars (clear single-image win)', () => {
+    expect(isCompressionProfitable(14000)).toBe(true);
+  });
+
+  it('isCompressionProfitable: false at 20000 chars (2 images @ 5000 == 5000 text — strict <)', () => {
+    // Hits 2-image break-even exactly. Strict < returns false for safety —
+    // we'd rather skip a tied trade than risk a net loss on a budgeting wobble.
+    expect(isCompressionProfitable(20000)).toBe(false);
+  });
+
+  it('isCompressionProfitable: true at 40000 chars (3 images, clear win)', () => {
+    expect(isCompressionProfitable(40000)).toBe(true);
+  });
+
+  it('break-even gate: 7000-char tool_result stays as text (below break-even)', async () => {
+    // Above the old 5000 minToolResultChars cutoff but still net-loss to
+    // image (image=2500 > text=7000/4=1750). The fast-path threshold (now
+    // 10000) catches it first; if someone overrides --min-tool-result-chars
+    // to 5000 the break-even check is the gate. Test it via override.
+    const longResult = 'x'.repeat(7000);
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
       messages: [
@@ -1482,28 +1515,29 @@ describe('transform', () => {
           ],
         },
       ],
-      // System needs to be large enough to trip the main compression so the
-      // tool_result loop runs.
-      system: 'x'.repeat(3000),
+      system: 'x'.repeat(40000),
     });
-    const { body: outBytes, info } = await transformRequest(new TextEncoder().encode(req));
+    // Override the fast-path threshold to 5000 so the break-even check is
+    // the only thing that can reject the block. Confirms the real gate.
+    const { body: outBytes, info } = await transformRequest(
+      new TextEncoder().encode(req),
+      { minToolResultChars: 5000 },
+    );
     expect(info.compressed).toBe(true);
-    // No tool_result images at the new threshold for a 3000-char block.
     expect(info.toolResultImgs ?? 0).toBe(0);
-    // The tool_result content in the rewritten body should still be the
-    // original 3000-char string (not replaced with image blocks).
+    expect(info.passthroughReasons?.not_profitable ?? 0).toBeGreaterThanOrEqual(1);
+    // tool_result content should still be the original 7000-char string.
     const out = JSON.parse(new TextDecoder().decode(outBytes));
     const tr = (out.messages[0].content as Array<{ type: string; content: unknown }>).find(
       (b) => b.type === 'tool_result',
     );
-    expect(tr).toBeDefined();
     expect(typeof tr!.content).toBe('string');
-    expect((tr!.content as string).length).toBe(3000);
+    expect((tr!.content as string).length).toBe(7000);
   });
 
-  it('threshold raise: 6000-char tool_result still images (above new cutoff)', async () => {
-    // Same shape, but above the new 5000-char threshold. Compression fires.
-    const longResult = 'x'.repeat(6000);
+  it('break-even gate: 13000-char tool_result still images (clear win at 1 image)', async () => {
+    // 13000 chars > 10000 break-even → image saves tokens.
+    const longResult = 'x'.repeat(13000);
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
       messages: [
@@ -1514,12 +1548,11 @@ describe('transform', () => {
           ],
         },
       ],
-      system: 'x'.repeat(3000),
+      system: 'x'.repeat(40000),
     });
     const { body: outBytes, info } = await transformRequest(new TextEncoder().encode(req));
     expect(info.compressed).toBe(true);
     expect((info.toolResultImgs ?? 0)).toBeGreaterThan(0);
-    // Content replaced with image blocks (no longer a string).
     const out = JSON.parse(new TextDecoder().decode(outBytes));
     const tr = (out.messages[0].content as Array<{ type: string; content: unknown }>).find(
       (b) => b.type === 'tool_result',
@@ -1527,33 +1560,46 @@ describe('transform', () => {
     expect(Array.isArray(tr!.content)).toBe(true);
   });
 
-  it('threshold raise: 1500-char reminder stays as text (was: imaged)', async () => {
-    // <system-reminder> block at 1500 chars. PRE-CHANGE: was 1000 cutoff,
-    // would image. POST-CHANGE: 2000 cutoff, stays as text.
-    const reminder = '<system-reminder>' + 'x'.repeat(1500) + '</system-reminder>';
+  it('break-even gate: 8000-char reminder stays as text (below break-even)', async () => {
+    // Below minReminderChars threshold (10000) → marked below_threshold.
+    const reminder = '<system-reminder>' + 'x'.repeat(8000) + '</system-reminder>';
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
       messages: [
         { role: 'user', content: [{ type: 'text', text: reminder }] },
       ],
-      system: 'x'.repeat(3000),
+      system: 'x'.repeat(40000),
     });
     const { info } = await transformRequest(new TextEncoder().encode(req));
     expect(info.compressed).toBe(true);
     expect(info.reminderImgs ?? 0).toBe(0);
+    expect(info.passthroughReasons?.below_threshold ?? 0).toBeGreaterThanOrEqual(1);
   });
 
-  it('threshold raise: 2500-char reminder still images (above new cutoff)', async () => {
-    const reminder = '<system-reminder>' + 'x'.repeat(2500) + '</system-reminder>';
+  it('break-even gate: 12000-char reminder images (above threshold and profitable)', async () => {
+    const reminder = '<system-reminder>' + 'x'.repeat(12000) + '</system-reminder>';
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
       messages: [
         { role: 'user', content: [{ type: 'text', text: reminder }] },
       ],
-      system: 'x'.repeat(3000),
+      system: 'x'.repeat(40000),
     });
     const { info } = await transformRequest(new TextEncoder().encode(req));
     expect(info.compressed).toBe(true);
     expect((info.reminderImgs ?? 0)).toBeGreaterThan(0);
+  });
+
+  it('break-even gate: passthroughReasons omitted when no passthrough happened', async () => {
+    // 40k slab, no per-block reminders or tool_results. Only the static slab
+    // gets imaged; nothing's gated by the per-block check.
+    const req = JSON.stringify({
+      model: 'claude-3-5-sonnet',
+      messages: [{ role: 'user', content: 'hi' }],
+      system: 'x'.repeat(40000),
+    });
+    const { info } = await transformRequest(new TextEncoder().encode(req));
+    expect(info.compressed).toBe(true);
+    expect(info.passthroughReasons).toBeUndefined();
   });
 });
