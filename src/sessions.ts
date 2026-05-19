@@ -160,14 +160,20 @@ export async function aggregateSessions(
     if (
       ev.compressed &&
       typeof ev.orig_chars === 'number' &&
-      typeof ev.image_bytes === 'number'
+      typeof ev.image_count === 'number'
     ) {
-      const saved = ev.orig_chars - ev.image_bytes;
-      if (saved > 0) {
-        s.charsSaved += saved;
-        // 3.75 chars/token is Anthropic's published rule-of-thumb.
-        s.tokensSavedEst += Math.round(saved / 3.75);
-      }
+      // Honest savings math, mirrors src/dashboard.ts:
+      //   textTokens  = orig_chars / 4      (Anthropic ~4 chars/token rule)
+      //   imageTokens = image_count × 2500  (empirical per-image cost)
+      //   tokensSaved = textTokens − imageTokens  (CAN be negative when
+      //     small per-block compressions cost more than they save)
+      // Previous formula compared chars to PNG bytes (mismatched units) AND
+      // clamped via `if (saved > 0)` which hid the cost-bleed entirely.
+      const textTokens = ev.orig_chars / 4;
+      const imageTokens = ev.image_count * 2500;
+      const tokensSaved = textTokens - imageTokens;
+      s.tokensSavedEst += Math.round(tokensSaved);
+      s.charsSaved += Math.round(tokensSaved * 4);
     }
     if (typeof ev.cache_read_tokens === 'number') {
       s.cacheReadTokens += ev.cache_read_tokens;

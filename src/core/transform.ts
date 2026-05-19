@@ -22,6 +22,7 @@ import type {
 import { renderTextToPngs, MAX_HEIGHT_PX, PAD_Y } from './render.js';
 import { bytesToBase64 } from './png.js';
 import { ATLAS_CELL_H } from './atlas.js';
+import { collapseHistory } from './history.js';
 
 export interface TransformOptions {
   /** Master switch — false makes this a no-op pass-through. */
@@ -55,6 +56,22 @@ export interface TransformOptions {
    *  rendering so the request stays under Anthropic's 100-image-per-request
    *  cap even when a single tool dumps a huge log. Default 10. */
   maxImagesPerToolResult?: number;
+  /** Variant C history-image compression: walk `messages[]` from the head,
+   *  find the largest closed-tool-sequence prefix, render its text into one
+   *  prepended user message with image blocks, and collapse those messages
+   *  out of the live tail. Off by default — round-3 spec marked this as
+   *  MARGINAL (~1% per-call cost reduction) with HIGH risk on cache topology.
+   *  Enable opt-in once telemetry confirms the cache breakpoint won't fight
+   *  with Claude Code's own upstream breakpoint placement. */
+  compressHistory?: boolean;
+  /** Number of tail turns to KEEP as text when `compressHistory` is on. The
+   *  most-recent assistant turn (carrying Opus 4.7's thinking signature) is
+   *  always in the tail by construction. Default 4. */
+  historyKeepTail?: number;
+  /** Minimum closed-prefix turn count before we bother collapsing. Cache-
+   *  amortization math from round-3 only pays out at scale — collapsing 2-3
+   *  turns costs more in image overhead than it saves. Default 10. */
+  historyMinPrefix?: number;
 }
 
 const DEFAULTS: Required<TransformOptions> = {
@@ -82,6 +99,13 @@ const DEFAULTS: Required<TransformOptions> = {
   // `find` over a big tree or `grep -r` can easily exceed this; the paging
   // marker tells the model what was elided. Tuneable per session.
   maxImagesPerToolResult: 10,
+  // Variant C history-image: OFF by default. Round-3 measurement put the
+  // savings at ~1% per call against ~3% cost-bleed risk if cache topology
+  // turns out wrong upstream. Enable via env / CLI flag once telemetry
+  // shows the static-slab breakpoint still hits when this is wired.
+  compressHistory: false,
+  historyKeepTail: 4,
+  historyMinPrefix: 10,
 };
 
 // --- per-block break-even check ---
@@ -233,6 +257,26 @@ export interface TransformInfo {
   truncatedToolResults?: number;
   /** Total chars elided by paging across all tool_results this request. */
   omittedChars?: number;
+  /** Variant C history-image: how many original `messages[]` entries got
+   *  collapsed into the prepended synthetic user message. 0 / unset when
+   *  no collapse happened (compressHistory off, no closed prefix, etc.). */
+  collapsedTurns?: number;
+  /** Variant C: total chars of text serialized into the history image(s)
+   *  before render (pre-OCR loss). */
+  collapsedChars?: number;
+  /** Variant C: number of PNG image blocks emitted for the history. Folded
+   *  into `info.imageCount` too — surfaced separately so dashboards can
+   *  attribute image-count growth to history vs system-slab vs reminders. */
+  collapsedImages?: number;
+  /** Variant C: why the history collapse didn't run (or did). Diagnostic
+   *  only — see `HistoryCollapseInfo.reason` for the value set. */
+  historyReason?:
+    | 'no_history'
+    | 'prefix_too_short'
+    | 'no_closed_prefix'
+    | 'not_profitable'
+    | 'render_empty'
+    | 'collapsed';
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -1294,6 +1338,42 @@ export async function transformRequest(
   }
 
   if (toolsRewritten) req.tools = toolsRewritten;
+
+  // 6. Variant C history-image compression. Runs AFTER all per-message
+  // rewrites so the collapsed prefix reflects final state. Off by default —
+  // round-3 spec marks the savings (~1% per call) as marginal vs the cache-
+  // topology risk. When on, walks messages[] back-to-front tracking open
+  // tool_use_ids; collapses the largest closed-prefix run into one prepended
+  // synthetic user message. Live tail (keepTail turns + anything in an open
+  // tool sequence) stays as text. History image carries NO cache_control on
+  // first ship — the static-slab breakpoint remains the sole pixelpipe
+  // breakpoint until telemetry shows otherwise.
+  if (o.compressHistory && Array.isArray(req.messages) && req.messages.length > 0) {
+    const { messages: newMessages, info: histInfo } = await collapseHistory(
+      req.messages,
+      isCompressionProfitable,
+      {
+        keepTail: o.historyKeepTail,
+        minCollapsePrefix: o.historyMinPrefix,
+        cols: o.cols,
+      },
+    );
+    if (histInfo.collapsedTurns > 0) {
+      req.messages = newMessages;
+      info.collapsedTurns = histInfo.collapsedTurns;
+      info.collapsedChars = histInfo.collapsedChars;
+      info.collapsedImages = histInfo.collapsedImages;
+      info.imageCount += histInfo.collapsedImages;
+      info.imageBytes += histInfo.collapsedImageBytes;
+      info.droppedChars = (info.droppedChars ?? 0) + histInfo.droppedChars;
+      for (const [cp, n] of histInfo.droppedCodepoints) {
+        droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
+      }
+      info.historyReason = 'collapsed';
+    } else if (histInfo.reason) {
+      info.historyReason = histInfo.reason;
+    }
+  }
 
   info.compressed = true;
   // Serialize the top dropped codepoints (if any) as `U+HHHH` → count. Cap at

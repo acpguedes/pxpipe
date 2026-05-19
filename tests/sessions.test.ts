@@ -135,32 +135,55 @@ describe('aggregateSessions', () => {
     expect(sessions.get('aaaaaaaa')?.requestCount).toBe(2);
   });
 
-  it('accumulates charsSaved only when compressed and saved>0', async () => {
+  it('accumulates tokens saved using honest formula (allows negative)', async () => {
     writeEvents(tmp, [
+      // 100,000 chars compressed to 2 images.
+      //   textTokens  = 100000/4 = 25000
+      //   imageTokens = 2 × 2500 = 5000
+      //   tokensSaved = +20000  → win
       ev({
         first_user_sha8: 'aaaaaaaa',
         compressed: true,
-        orig_chars: 1000,
-        image_bytes: 200,
-      }), // +800
+        orig_chars: 100_000,
+        image_count: 2,
+      }),
+      // 5,000 chars compressed to 1 image — NET LOSS.
+      //   textTokens  = 5000/4 = 1250
+      //   imageTokens = 1 × 2500 = 2500
+      //   tokensSaved = -1250  → loss; must NOT be clamped
       ev({
         first_user_sha8: 'aaaaaaaa',
         compressed: true,
-        orig_chars: 100,
-        image_bytes: 500,
-      }), // negative -> skipped
+        orig_chars: 5_000,
+        image_count: 1,
+      }),
+      // Not compressed at all — skipped.
       ev({
         first_user_sha8: 'aaaaaaaa',
         compressed: false,
         orig_chars: 1000,
-        image_bytes: 0,
-      }), // not compressed -> skipped
+        image_count: 0,
+      }),
     ]);
     const { sessions } = await aggregateSessions(tmp);
     const s = sessions.get('aaaaaaaa')!;
-    expect(s.charsSaved).toBe(800);
-    // 800 / 3.75 ≈ 213 — round-trip through Math.round.
-    expect(s.tokensSavedEst).toBe(Math.round(800 / 3.75));
+    // 20000 + (-1250) = 18750 tokens net.
+    expect(s.tokensSavedEst).toBe(18_750);
+    expect(s.charsSaved).toBe(18_750 * 4);
+  });
+
+  it('reports negative tokensSavedEst when all compressions net-lose', async () => {
+    writeEvents(tmp, [
+      // 3 small blocks each net-lose ~1250 tokens.
+      ev({ first_user_sha8: 'bbbbbbbb', compressed: true, orig_chars: 5000, image_count: 1 }),
+      ev({ first_user_sha8: 'bbbbbbbb', compressed: true, orig_chars: 5000, image_count: 1 }),
+      ev({ first_user_sha8: 'bbbbbbbb', compressed: true, orig_chars: 5000, image_count: 1 }),
+    ]);
+    const { sessions } = await aggregateSessions(tmp);
+    const s = sessions.get('bbbbbbbb')!;
+    // 3 × (1250 - 2500) = -3750 tokens.
+    expect(s.tokensSavedEst).toBe(-3750);
+    expect(s.charsSaved).toBe(-15_000);
   });
 });
 
