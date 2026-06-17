@@ -42,3 +42,6 @@ SESSION_PLAYBOOK.md
 .continue/
 eval/gsm8k/novel_imgs/
 eval/gist-recall/work*/*.png
+# Eval corpus = real captured transcripts (PII: file paths, project names, and
+# message content). Keep a local copy for eval scripts, but never commit it.
+eval/corpus/

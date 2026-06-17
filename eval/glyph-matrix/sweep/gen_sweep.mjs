@@ -2,7 +2,7 @@
 // Isolates ONE variable — pixels-per-glyph (cell size) — from density/search.
 // Short lines so every cell size fits one <=1568px page. Same content across
 // sizes => only resolution changes. Reader accuracy vs cell size = the curve.
-import { renderTextToPngs } from '/Users/user/Downloads/repos/pixelpipe/dist/core/render.js';
+import { renderTextToPngs } from '../../../dist/core/render.js';
 import { writeFileSync, mkdirSync } from 'node:fs';
 const OUT = '/tmp/sweep'; mkdirSync(OUT, { recursive: true });
 

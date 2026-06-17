@@ -179,8 +179,8 @@ blocks, splices them back cache-friendly (static prefix preserved, so prompt
 caching keeps working), and forwards. Per-request events log to
 `~/.pxpipe/events.jsonl`.
 
-The economics: a 1928×1928 image costs ≈4,761 vision tokens and holds ≈92,000
-readable chars (≈48,000 text tokens at the observed density), so plain text is
+The economics: a 1928×1928 image costs ≈4,761 vision tokens and holds up to
+≈92,000 chars (≈48,000 text tokens at the observed density), so plain text is
 cheaper *only* when it runs denser than ~19 chars/token. Claude Code transcripts
 are far below that (observed 1.91 chars/token, N=391). The runtime estimator (`estimateImageCount`) plus a chars/token gate
 decides per-request; sparse prose is left as text.

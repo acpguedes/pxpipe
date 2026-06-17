@@ -18,7 +18,10 @@ multi-agent code review with five confirmed fixes. Reviewed at extra-high recall
   1568→1932; dense tool/history pages now `DENSE_CONTENT_COLS=384` /
   `DENSE_CONTENT_CHARS_PER_IMAGE=92160` (1928×1928 full page) — fewer image
   blocks at the same OCR-validated 5×8 cell. The static slab is unchanged
-  (313 cols / 1573×1280). Pages never trip a server-side downscale.
+  (313 cols / 1573×1280). Pages never trip a server-side downscale. Note: the
+  larger per-page density uses the validated 5×8 cell and stays within
+  Anthropic's pixel/token limits, but OCR legibility at this page size has not
+  been independently re-eval'd (revert = the four render constants).
 - **Opus is OFF by default.** Production scope defaults to **Fable-5 only**;
   Opus 4.8/4.7 are opt-in (they read imaged content at a measurable tax — see
   FINDINGS.md). Opt in via `PXPIPE_MODELS` or the dashboard chips.
