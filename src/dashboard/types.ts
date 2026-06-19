@@ -156,10 +156,10 @@ export interface CurrentSessionPayload {
   allActualInputWeighted?: number;
   /** Σ outputWeighted over all session requests. */
   allOutputWeighted?: number;
-  /** Raw input tokens (no rate weighting): Σ(input+cache_create+cache_read). Headline: 1 − rawActual/rawBaseline. */
+  /** Raw input tokens (no rate weighting): Σ(input+cache_create+cache_read). Cache-blind — kept for the math drawer, NOT the headline (which uses the weighted pair). */
   rawActualTokens?: number;
-  /** Σ count_tokens of each body as plain text — the baseline side. */
+  /** Σ count_tokens of each body as plain text — the cache-blind baseline side. */
   rawBaselineTokens?: number;
-  /** Raw output tokens. Added to both sides so the headline isn't input-only. */
+  /** Raw output tokens — shown as an "untouched" note; output is never compressed. */
   rawOutputTokens?: number;
 }

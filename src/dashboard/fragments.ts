@@ -136,30 +136,31 @@ export function renderSessionSummaryFragment(data: CurrentSessionPayload): strin
       `</div>`
     );
   }
-  // Raw token reduction (no rate weighting); output added to both sides so the % isn't input-only.
-  const rawActual = data.rawActualTokens ?? 0; // real input (in+cc+cr)
-  const rawBaseline = data.rawBaselineTokens ?? 0; // count_tokens baseline
-  const rawOutput = data.rawOutputTokens ?? 0; // reply — same on both sides
-  const ppTotal = rawActual + rawOutput;
-  const textTotal = rawBaseline + rawOutput;
-  const totalPct = textTotal > 0 ? (1 - ppTotal / textTotal) * 100 : 0;
-  const inputPct = rawBaseline > 0 ? (1 - rawActual / rawBaseline) * 100 : 0;
-  const positive = totalPct >= 0;
-  const bigNum = `${Math.abs(totalPct).toFixed(0)}%`;
+  // Cache-aware reduction — same basis as the Details panel + Saved column.
+  // Raw count_tokens would over-claim: most of the text baseline would have been
+  // cheap cache-reads (~0.1×), not full-price tokens. Weighting both sides at their
+  // real cache rate is the only comparison that can't contradict the Saved column.
+  // Input-only: pxpipe never touches output, so lumping it in just dampened the %.
+  const baselineW = data.baselineInputWeighted ?? 0; // same context as text, cache-aware
+  const actualW = data.actualInputWeighted ?? 0; // what we actually sent, cache-aware
+  const rawOutput = data.rawOutputTokens ?? 0; // reply — never compressed
+  const inputPct = baselineW > 0 ? (1 - actualW / baselineW) * 100 : 0;
+  const positive = inputPct >= 0;
+  const bigNum = `${Math.abs(inputPct).toFixed(0)}%`;
   const word = positive ? 'fewer tokens' : 'more tokens';
 
   return (
     `<div class="hero${positive ? '' : ' hero-neg'}">` +
     `<div class="hero-eyebrow">This session · ${measured} request${measured === 1 ? '' : 's'}</div>` +
-    `<div class="hero-headline"><span class="hero-num">${bigNum}</span> ${word} sent to Claude</div>` +
+    `<div class="hero-headline"><span class="hero-num">${bigNum}</span> ${word} after caching</div>` +
     `<div class="hero-sub">` +
-    `<strong>${kFmt(ppTotal)}</strong> tokens actually sent vs <strong>${kFmt(textTotal)}</strong> if it were all plain text. ` +
+    `<strong>${kFmt(actualW)}</strong> effective tokens vs <strong>${kFmt(baselineW)}</strong> if this same context ` +
+    `stayed plain text — both counted after normal cache discounts. ` +
     `Your latest messages and Claude's live output are never compressed.` +
     `</div>` +
     `<div class="hero-meta">` +
-    `Input context compressed <b class="${inputPct >= 0 ? 'good' : 'bad'}">${inputPct.toFixed(0)}%</b> ` +
-    `(${kFmt(rawActual)} vs ${kFmt(rawBaseline)} as text) · ` +
-    `output untouched (${kFmt(rawOutput)}) · no pricing assumptions` +
+    `Cache-aware — cached reads counted at their real ~0.1× weight, not full price · ` +
+    `output untouched (${kFmt(rawOutput)}) · no $ assumptions` +
     `</div>` +
     `</div>`
   );
