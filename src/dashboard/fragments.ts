@@ -328,6 +328,7 @@ export interface ContextMapData {
   buckets: Partial<Record<string, number>>; // bucket → chars rendered to PNG
   imageIds: number[]; // image-ring ids for the gallery
   compressed: boolean;
+  restored?: boolean; // rebuilt from JSONL after a restart — PNG thumbnails are gone
 }
 
 const CTXMAP_BUCKETS: ReadonlyArray<readonly [string, string]> = [
@@ -383,7 +384,9 @@ export function renderContextMapFragment(
         )
         .join('') +
       `</div>`
-    : '';
+    : c.restored && c.imageCount > 0
+      ? `<div class="pages-title">${c.imageCount} image page${c.imageCount === 1 ? '' : 's'} were sent — thumbnails expired when the proxy restarted. The breakdown above is reconstructed from the saved log.</div>`
+      : '';
 
   const headline = !showCompare
     ? `<strong>${kFmt(c.actualInputEff || c.realInput)}</strong> billed tokens sent`

@@ -727,13 +727,41 @@ export class DashboardState {
           : 0;
       // Output tokens land in the row for the table; totals are not
       // restored on replay (see header comment on cumulative totals).
+      const compressed = t.compressed === true;
+      // Rebuild the Context Map breakdown so old rows keep their "Saved" value
+      // and "Details" link after a restart. The PNG ring is in-memory and gone,
+      // so thumbnails can't return (imageIds: [], flagged `restored`) — but the
+      // headline %, buckets and Saved delta all reconstruct from the persisted
+      // event with the same cache-weighted math as the live update() path.
+      const imageCount = (t as { image_count?: number }).image_count ?? 0;
+      let imgId: number | undefined;
+      if (compressed && haveUsage && (imageCount > 0 || typeof baseline === 'number')) {
+        imgId = this.nextImageId++;
+        this.contextHistory.push({
+          id: imgId,
+          baselineTokens: baseline ?? 0,
+          realInput: inp + cc + cr,
+          baselineInputEff,
+          actualInputEff,
+          haveBaseline,
+          output: out,
+          imageCount,
+          buckets: { ...((t as { bucket_chars?: Record<string, number> }).bucket_chars ?? {}) },
+          imageIds: [], // PNG ring is in-memory; not restorable across restart
+          compressed,
+          restored: true,
+        });
+        if (this.contextHistory.length > RECENT_CAP) {
+          this.contextHistory.splice(0, this.contextHistory.length - RECENT_CAP);
+        }
+      }
       const row: RecentRow = {
         ts: Date.parse(t.ts) / 1000,
         method: t.method,
         path: t.path,
         status: t.status,
-        compressed: t.compressed === true,
-        cc_added: t.compressed === true ? 1 : undefined,
+        compressed,
+        cc_added: compressed ? 1 : undefined,
         input_tokens: t.input_tokens,
         output_tokens: t.output_tokens,
         cache_create: t.cache_create_tokens,
@@ -741,6 +769,10 @@ export class DashboardState {
         actual_input: haveUsage ? round1(actualInputEff) : undefined,
         baseline_input:
           haveBaseline && haveUsage ? round1(baselineInputEff) : undefined,
+        session_saved_so_far_delta:
+          haveBaseline && haveUsage ? round1(baselineInputEff - actualInputEff) : undefined,
+        img_id: imgId,
+        img_ids: imgId !== undefined ? [imgId] : undefined,
       };
       this.recent.push(row);
     }
