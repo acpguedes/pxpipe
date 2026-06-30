@@ -4,6 +4,25 @@ All notable changes to pxpipe are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor = features /
 behavioral changes, patch = fixes).
 
+## 0.6.10 — 2026-06-30
+
+### Fixed
+- **Dashboard savings no longer invent phantom rows from cache *assumptions*
+  about the text counterfactual.** Warmth for the imagined text path is now taken
+  strictly from the **observed cache state** of the real request (`cr > 0` = warm,
+  `cr === 0` = cold) instead of being inferred from the wall-clock cache TTL. Using
+  TTL to claim text "would have been cached" while the actual image request read no
+  cache was an unobservable counterfactual that could manufacture negative
+  ("loss") rows — such as the reported "800%-worse" row — from cache assumptions
+  rather than real token deltas. A completed same-prefix prior now only sizes the
+  reused-vs-grown split; with none, full reuse is assumed (conservative). Threaded
+  identically through the live `update()`, the JSONL `replay()`, and
+  `aggregateSessions` so the dashboard and session views can't drift.
+  (`baseline.ts`, `dashboard.ts`, `sessions.ts`)
+- **Recent table surfaces imaging losses honestly** instead of hiding negative
+  deltas as "—": losses render in red, and the headings are clarified as
+  billing-equivalent input tokens ("Saved/lost"). (`dashboard/fragments.ts`)
+
 ## 0.6.4 — 2026-06-23
 
 ### Fixed
