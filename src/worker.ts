@@ -11,7 +11,7 @@
  * Config lives in wrangler.toml.
  */
 
-import { createProxy, type ProxyConfig } from './core/proxy.js';
+import { createProxy, type ProxyConfig, type ProxyEvent } from './core/proxy.js';
 import type { TransformOptions } from './core/transform.js';
 import { toTrackEvent, JsonLogTracker, noopTracker, type Tracker } from './core/tracker.js';
 
@@ -39,6 +39,12 @@ export interface Env {
    *  Cloudflare ingests console.log as Workers Logs; pipe via Logpush to
    *  R2/S3 for the same JSONL shape Node writes to disk. */
   PXPIPE_TRACK?: string;
+  /** Optional R2 bucket binding for redacted debug sidecars. Disabled unless PXPIPE_DEBUG_SIDECARS is truthy. */
+  PXPIPE_DEBUG_R2_BUCKET?: R2Bucket;
+  PXPIPE_DEBUG_SIDECARS?: string;
+  PXPIPE_DEBUG_SAMPLE_RATE?: string;
+  /** Opt-in audit marker: records outcome/cost metadata in TrackEvent, never duplicates live upstream requests. */
+  PXPIPE_AUDIT_MODE?: string;
   /** Shared secret callers must present via the `x-pxpipe-secret` header
    *  whenever an API-key override is configured. Without this gate a
    *  discovered workers.dev URL is an open key-spender: the Worker would
@@ -64,6 +70,39 @@ async function secretsMatch(a: string, b: string): Promise<boolean> {
 
 const truthy = (v: string | undefined, fallback: boolean): boolean =>
   v == null ? fallback : v === '1' || v.toLowerCase() === 'true';
+
+async function gunzipBytes(body: Uint8Array): Promise<Uint8Array> {
+  const stream = new Response(body as BufferSource).body!.pipeThrough(new DecompressionStream('gzip'));
+  const buf = await new Response(stream).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+function redactDebugText(text: string): string {
+  return text
+    .replace(/("(?:api[_-]?key|authorization|token|secret|password)"\s*:\s*")([^"\\]*(?:\\.[^"\\]*)*)"/gi, '$1[REDACTED]"')
+    .replace(/\b(sk-[A-Za-z0-9_-]{12,}|xox[baprs]-[A-Za-z0-9-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,})\b/g, '[REDACTED]')
+    .replace(/\b(authorization|x-api-key)\s*[:=]\s*bearer\s+[^\s,"']+/gi, '$1: Bearer [REDACTED]');
+}
+
+async function maybeWriteR2DebugSidecar(ev: ProxyEvent, env: Env): Promise<void> {
+  if (!truthy(env.PXPIPE_DEBUG_SIDECARS, false) || !env.PXPIPE_DEBUG_R2_BUCKET || !ev.reqBodyGz) return;
+  const rate = env.PXPIPE_DEBUG_SAMPLE_RATE ? Number(env.PXPIPE_DEBUG_SAMPLE_RATE) : 1;
+  if (!Number.isFinite(rate) || rate <= 0 || Math.random() > Math.min(1, rate)) return;
+  try {
+    const plain = await gunzipBytes(ev.reqBodyGz);
+    const redacted = new TextEncoder().encode(redactDebugText(new TextDecoder().decode(plain)));
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const key = `pxpipe-debug/${stamp}-${ev.reqBodySha8 ?? 'nohash'}.json`;
+    await env.PXPIPE_DEBUG_R2_BUCKET.put(key, redacted, {
+      httpMetadata: { contentType: 'application/json' },
+      customMetadata: { sha8: ev.reqBodySha8 ?? '', redacted: 'true' },
+    });
+    ev.debugSidecar = { kind: 'r2', pointer: key, bytes: redacted.byteLength, redacted: true };
+    ev.reqBodyGz = undefined;
+  } catch (err) {
+    console.warn(`[pxpipe warn] failed to write R2 debug sidecar: ${(err as Error).message}`);
+  }
+}
 
 export default {
   async fetch(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
@@ -126,7 +165,7 @@ export default {
       openAIUpstream: env.OPENAI_UPSTREAM ?? sharedUpstream ?? 'https://api.openai.com',
       openAIApiKey: env.OPENAI_API_KEY,
       transform,
-      onRequest: (e) => {
+      onRequest: async (e) => {
         // Terse human-readable line (separate from the JSON event below;
         // shows up in `wrangler tail`).
         const tag = e.info?.compressed
@@ -141,6 +180,8 @@ export default {
           );
         }
 
+        if (truthy(env.PXPIPE_AUDIT_MODE, false)) e.auditSample = true;
+        await maybeWriteR2DebugSidecar(e, env);
         tracker.emit(toTrackEvent(e));
       },
     };

@@ -158,7 +158,12 @@ export interface TrackEvent {
   req_body_sample_b64?: string;
   /** Node host only: path to gzipped sidecar when inline cap exceeded. Workers drop oversized samples. */
   req_body_sample_path?: string;
+  /** Optional Worker/Node debug sidecar pointer for redacted large request/error samples. */
+  debug_sidecar?: { kind: 'r2' | 'file'; pointer: string; bytes?: number; redacted?: boolean };
+  /** Opt-in audit marker; audit mode records only outcome/cost metadata already present in this row. */
+  audit_sample?: boolean;
 }
+
 
 /** Max inline base64 body per JSONL row (32 KiB). Larger goes to sidecar (Node) or is dropped (Workers). */
 export const TRACK_BODY_INLINE_MAX = 32 * 1024;
@@ -226,6 +231,8 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
   if (ev.error) out.error = ev.error;
   if (ev.errorBody) out.error_body = ev.errorBody;
   if (ev.reqBodySha8) out.req_body_sha8 = ev.reqBodySha8;
+  if (ev.debugSidecar) out.debug_sidecar = ev.debugSidecar;
+  if (ev.auditSample) out.audit_sample = true;
   // Body sample: sidecar path (Node) > inline base64 if it fits > drop (Workers, oversized).
   if (ev.reqBodySamplePath) {
     out.req_body_sample_path = ev.reqBodySamplePath;

@@ -95,6 +95,10 @@ export interface ProxyEvent {
   reqBodyGz?: Uint8Array;
   /** Set by the Node host instead of reqBodyGz when the body was written to a sidecar file. */
   reqBodySamplePath?: string;
+  /** Optional debug sidecar pointer populated by hosts with explicit sidecar config. */
+  debugSidecar?: { kind: 'r2' | 'file'; pointer: string; bytes?: number; redacted?: boolean };
+  /** Opt-in audit marker; no request replay is performed by pxpipe. */
+  auditSample?: boolean;
   /** Ground-truth char counts from the response stream, independent of usage.output_tokens.
    *  Absent when the body couldn't be scanned (5xx, unknown content-type). See OutputMeasurement. */
   measurement?: OutputMeasurement;
