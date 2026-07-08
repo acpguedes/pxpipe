@@ -13,6 +13,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { createProxy, parseGatewayHeaders, resolveUpstreams, type ProxyConfig } from './core/proxy.js';
+import { transformRequest } from './core/transform.js';
+import { aggregateEventsFile, renderTextReport, summaryToJson } from './stats.js';
 import {
   parseExportArgv,
   runExportCore,
@@ -133,6 +135,13 @@ function printHelp(): void {
 Usage:
   pxpipe                run the proxy (no flags)
   pxpipe export [...]   render files/diff to PNG pages + cost report (see pxpipe export --help)
+  pxpipe doctor         validate local pxpipe environment/configuration
+  pxpipe audit-log <events.jsonl>
+                       summarize operational risks in an event log
+  pxpipe calibrate <events.jsonl>
+                       estimate per-bucket chars/token values
+  pxpipe explain <request.json>
+                       show transform decision without sending upstream
 
 The proxy compresses eligible tools, schemas, reminders, tool_results,
 and history; tracks events to disk; and measures real saved_pct via
@@ -167,6 +176,8 @@ Environment:
   PXPIPE_LOG              JSONL events path (default ~/.pxpipe/events.jsonl)
   PXPIPE_DUMP_DIR         debug: write every rendered PNG here (what the model
                           sees); off unless set. Compress arm only.
+  PXPIPE_AUDIT_MODE       opt-in: mark events as audit samples for offline
+                          audit-log reporting; never duplicates live requests.
 
 Use with Claude Code:
   ANTHROPIC_BASE_URL=http://127.0.0.1:47821 claude
@@ -873,6 +884,78 @@ async function runExport(argv: string[]): Promise<void> {
   }
 }
 
+
+// ---- maintenance CLI commands --------------------------------------------
+
+function printMaintenanceUsage(cmd: string): void {
+  console.error(`[pxpipe ${cmd}] usage: pxpipe ${cmd} <events.jsonl|request.json>`);
+}
+
+function runDoctor(): void {
+  const cfg = parseCli([]);
+  const checks: Array<[string, boolean, string]> = [];
+  checks.push(['node >=18', Number(process.versions.node.split('.')[0]) >= 18, process.versions.node]);
+  checks.push(['dashboard loopback by default', cfg.host === '127.0.0.1' || cfg.host === 'localhost' || cfg.host === '::1', `HOST=${cfg.host}`]);
+  try { fs.mkdirSync(path.dirname(cfg.eventsFile), { recursive: true }); fs.accessSync(path.dirname(cfg.eventsFile), fs.constants.W_OK); checks.push(['events log directory writable', true, cfg.eventsFile]); }
+  catch (e) { checks.push(['events log directory writable', false, (e as Error).message]); }
+  checks.push(['anthropic upstream configured', Boolean(cfg.upstream), cfg.upstream]);
+  checks.push(['openai upstream configured', Boolean(cfg.openAIUpstream), cfg.openAIUpstream]);
+  console.log('━━━ pxpipe doctor ━━━');
+  for (const [name, ok, detail] of checks) console.log(`${ok ? 'ok ' : 'ERR'}  ${name} — ${detail}`);
+  console.log('\nRemediation: keep HOST on loopback unless you add your own auth boundary; set PXPIPE_LOG to a writable JSONL path; set ANTHROPIC_UPSTREAM/OPENAI_UPSTREAM only when using a compatible gateway.');
+  if (checks.some(([, ok]) => !ok)) process.exitCode = 1;
+}
+
+async function runAuditLog(argv: string[]): Promise<void> {
+  const file = argv[0];
+  if (!file) { printMaintenanceUsage('audit-log'); process.exit(2); }
+  const result = await aggregateEventsFile(file);
+  if (!result) { console.error(`[pxpipe audit-log] file not found: ${file}`); process.exit(1); }
+  console.log(renderTextReport(result.summary));
+  const j = summaryToJson(result.summary) as Record<string, unknown>;
+  console.log('\n━━━ audit highlights ━━━');
+  console.log(`parsed=${result.parsed} dropped=${result.dropped}`);
+  console.log(`unknown_tags=${JSON.stringify(j.unknownTags ?? [])}`);
+  console.log(`churning_tags=${JSON.stringify(j.churningTags ?? [])}`);
+  console.log(`dropped_codepoints=${j.droppedCodepoints}`);
+  console.log(`truncation_count=${j.truncationCount}`);
+  console.log('Remediation: classify unknown/churning tags in src/core/transform.ts, expand glyph atlas for frequent dropped codepoints, and inspect truncation rows before counting savings as quality-neutral.');
+}
+
+async function runCalibrate(argv: string[]): Promise<void> {
+  const file = argv[0];
+  if (!file) { printMaintenanceUsage('calibrate'); process.exit(2); }
+  const result = await aggregateEventsFile(file);
+  if (!result) { console.error(`[pxpipe calibrate] file not found: ${file}`); process.exit(1); }
+  console.log('━━━ pxpipe calibrate ━━━');
+  for (const [bucket, stat] of result.summary.bucketStats.entries()) {
+    const cpt = stat.estimatedTokens > 0 ? (stat.chars / stat.estimatedTokens).toFixed(2) : 'insufficient-baseline';
+    console.log(`${bucket}: samples=${stat.samples} chars=${stat.chars} chars_per_token=${cpt}`);
+  }
+  console.log('\nRemediation: only promote values with enough baseline-probed samples; configure bucketCharsPerToken conservatively.');
+}
+
+async function runExplain(argv: string[]): Promise<void> {
+  const file = argv[0];
+  if (!file) { printMaintenanceUsage('explain'); process.exit(2); }
+  let bytes: Uint8Array;
+  try { bytes = fs.readFileSync(file); } catch (e) { console.error(`[pxpipe explain] cannot read ${file}: ${(e as Error).message}`); process.exit(1); }
+  try { JSON.parse(Buffer.from(bytes).toString('utf8')); } catch (e) { console.error(`[pxpipe explain] request must be JSON: ${(e as Error).message}`); process.exit(1); }
+  const { body, info } = await transformRequest(bytes);
+  console.log(JSON.stringify({
+    compressed: info.compressed,
+    reason: info.reason ?? (info.compressed ? 'compressed' : 'not_compressed'),
+    origChars: info.origChars,
+    compressedChars: info.compressedChars,
+    imageCount: info.imageCount,
+    imageBytes: info.imageBytes,
+    bucketChars: info.bucketChars,
+    passthroughReasons: info.passthroughReasons,
+    decisionSummaries: toTrackEvent({ method: 'POST', path: '/v1/messages', status: 0, durationMs: 0, info }).decision_summaries,
+    outputBytes: body.byteLength,
+  }, null, 2));
+}
+
 // ---- main ----------------------------------------------------------------
 
 async function main(): Promise<void> {
@@ -881,6 +964,10 @@ async function main(): Promise<void> {
     await runExport(argv.slice(1));
     return; // server never starts
   }
+  if (argv[0] === 'doctor') { runDoctor(); return; }
+  if (argv[0] === 'audit-log') { await runAuditLog(argv.slice(1)); return; }
+  if (argv[0] === 'calibrate') { await runCalibrate(argv.slice(1)); return; }
+  if (argv[0] === 'explain') { await runExplain(argv.slice(1)); return; }
   // No subcommands — pxpipe is just the proxy. Stats / sessions / cleanup
   // tools live in the dashboard (see http://127.0.0.1:${port}/).
   const opts = parseCli(argv);
@@ -1037,6 +1124,9 @@ async function main(): Promise<void> {
         // it (still too big to inline). We never lose the sha8 / error_body.
       }
 
+      if (['1', 'true', 'yes', 'on'].includes((process.env.PXPIPE_AUDIT_MODE ?? '').toLowerCase())) {
+        e.auditSample = true;
+      }
       // Persistent JSONL event for offline analysis (pxpipe stats etc.).
       tracker.emit(toTrackEvent(e));
     },
