@@ -64,9 +64,11 @@ export interface RecentPayload {
 
 export interface RecentRow {
   ts: number;
+  ts_iso?: string;
   method: string;
   path: string;
   model?: string;
+  effort?: string;
   status: number;
   size_in?: number;
   compressed: boolean;

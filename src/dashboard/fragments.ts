@@ -471,6 +471,14 @@ export function renderContextMapFragment(
 
 // ---- recent requests table -----------------------------------------------
 
+
+function formatRowTime(e: RecentRow): { local: string; iso: string } {
+  const ms = Number.isFinite(e.ts) && e.ts > 0 ? e.ts * 1000 : Date.parse(e.ts_iso ?? '');
+  if (!Number.isFinite(ms)) return { local: '—', iso: 'unknown timestamp' };
+  const d = new Date(ms);
+  return { local: d.toLocaleString(), iso: d.toISOString() };
+}
+
 function statusCls(status: number): string {
   if (status >= 500) return 'bad';
   if (status >= 400) return 'warn';
@@ -481,9 +489,10 @@ export function renderRecentFragment(p: RecentPayload): string {
   const rows = (p.recent ?? []).slice().reverse();
   const body =
     rows.length === 0
-      ? `<tr><td colspan="10" class="empty-cell">No requests yet — they stream in here live.</td></tr>`
+      ? `<tr><td colspan="12" class="empty-cell">No requests yet — they stream in here live.</td></tr>`
       : rows
           .map((e: RecentRow, i: number) => {
+            const time = formatRowTime(e);
             const viewId = (e.img_ids ?? (e.img_id != null ? [e.img_id] : []))[0];
             const viewLink =
               viewId != null
@@ -516,9 +525,11 @@ export function renderRecentFragment(p: RecentPayload): string {
             return (
               `<tr>` +
               `<td class="muted">${i + 1}</td>` +
+              `<td><time title="${escapeHtml(time.iso)}">${escapeHtml(time.local)}</time></td>` +
               `<td><span class="pill pill-${statusCls(e.status)}">${e.status}</span></td>` +
               `<td class="endp">${escapeHtml(shortPath(e.path))}</td>` +
               `<td>${e.model ? `<code>${escapeHtml(e.model)}</code>` : '<span class="muted">—</span>'}</td>` +
+              `<td>${e.effort ? `<code title="raw effort: ${escapeHtml(e.effort)}">${escapeHtml(e.effort)}</code>` : '<span class="muted">—</span>'}</td>` +
               `<td>${imaged}</td>` +
               `<td class="num">${e.cache_read != null ? numFmt(e.cache_read) : '—'}</td>` +
               `<td class="num">${e.baseline_input != null ? numFmt(e.baseline_input) : '—'}</td>` +
@@ -532,9 +543,11 @@ export function renderRecentFragment(p: RecentPayload): string {
   return (
     `<table class="rtable"><thead><tr>` +
     `<th>#</th>` +
+    `<th>Time</th>` +
     `<th>Result</th>` +
     `<th>Endpoint</th>` +
     `<th>Model</th>` +
+    `<th title="Reasoning/model effort from the request, when present">Effort</th>` +
     `<th title="Was this request's context compressed into an image?">Sent as</th>` +
     `<th class="num" title="Tokens served from Claude's cache (cheap)">Cache hits</th>` +
     `<th class="num" title="Billing-equivalent input if kept as plain text, after cache create/read rates">As text</th>` +
@@ -1082,6 +1095,7 @@ export function renderPage(port: number): string {
   <div class="xray">
     <div class="card">
       <h3 class="card-head">Recent requests</h3>
+      <button class="btn tiny" title="Clear recent rows and reset live counters; persisted JSONL logs are left untouched." hx-post="/fragments/recent" hx-confirm="Clear dashboard history and reset live counters? Persisted logs will not be deleted." hx-target="#frag-recent" hx-swap="innerHTML" hx-on::after-request="htmx.trigger('#frag-header','load'); htmx.trigger('#frag-session','load'); htmx.trigger('#frag-context-map','load')">Clear live history</button>
       <div id="frag-recent" hx-get="/fragments/recent" hx-trigger="load, every 2s" hx-swap="innerHTML"></div>
     </div>
     <div class="card">

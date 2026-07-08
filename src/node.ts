@@ -379,6 +379,10 @@ async function dispatchDashboard(
         dashboard.handleCompressionToggle({ enabled });
         return dashboard.serveFragment('toggle', url, port);
       }
+      if (route.name === 'recent' && method === 'POST') {
+        dashboard.handleDashboardClear();
+        return dashboard.serveFragment('recent', url, port);
+      }
       // /fragments/models POSTs one chip flip: {model, on}. Server mutates the
       // runtime compress scope and returns the re-rendered chip row.
       if (route.name === 'models' && method === 'POST') {
@@ -403,6 +407,15 @@ async function dispatchDashboard(
       }
       if (method !== 'GET') return undefined;
       return dashboard.serveFragment(route.name, url, port);
+    }
+    case 'api-dashboard-clear': {
+      if (method !== 'POST') {
+        return new Response(JSON.stringify({ error: 'use POST' }), {
+          status: 405,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return dashboard.handleDashboardClear();
     }
     case 'api-compression': {
       if (method !== 'POST') {
