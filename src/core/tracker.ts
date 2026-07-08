@@ -14,6 +14,8 @@ export interface TrackEvent {
   path: string;
   /** Top-level request model when present. */
   model?: string;
+  /** Request effort/reasoning-effort when present in the request shape. */
+  effort?: string;
   status: number;
   duration_ms: number;
   first_byte_ms?: number;
@@ -175,6 +177,7 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     duration_ms: ev.durationMs,
   };
   if (ev.model) out.model = ev.model;
+  if (ev.effort) out.effort = ev.effort;
   if (ev.firstByteMs !== undefined) out.first_byte_ms = ev.firstByteMs;
   if (ev.error) out.error = ev.error;
   if (ev.errorBody) out.error_body = ev.errorBody;

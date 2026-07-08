@@ -117,9 +117,11 @@ interface ImageEntry {
  *  workload). */
 export interface RecentRow {
   ts: number;
+  ts_iso?: string;
   method: string;
   path: string;
   model?: string;
+  effort?: string;
   status: number;
   size_in?: number;
   compressed: boolean;
@@ -435,29 +437,32 @@ export class DashboardState {
    *  long-running deployments. 50 sessions × ~13 numeric fields each is
    *  comfortably under a MB even with fat bucket/passthrough histograms. */
   private static readonly SESSION_CAP = 50;
-  private totals: Totals = {
-    requests: 0,
-    compressedRequests: 0,
-    actualInputWeighted: 0,
-    baselineInputWeighted: 0,
-    outputWeighted: 0,
-    allBaselineEquivalentWeighted: 0,
-    allActualInputWeighted: 0,
-    allOutputWeighted: 0,
-    allUsageRequests: 0,
-    compressedPaidRequests: 0,
-    compressedActualInputWeighted: 0,
-    compressedOutputWeighted: 0,
-    passthroughPaidRequests: 0,
-    passthroughActualInputWeighted: 0,
-    passthroughOutputWeighted: 0,
-    textCharsMeasured: 0,
-    thinkingCharsMeasured: 0,
-    toolUseCharsMeasured: 0,
-    redactedBlockCountMeasured: 0,
-    eventsWithMeasurement: 0,
-    startedAt: Date.now() / 1000,
-  };
+  private makeEmptyTotals(): Totals {
+    return {
+      requests: 0,
+      compressedRequests: 0,
+      actualInputWeighted: 0,
+      baselineInputWeighted: 0,
+      outputWeighted: 0,
+      allBaselineEquivalentWeighted: 0,
+      allActualInputWeighted: 0,
+      allOutputWeighted: 0,
+      allUsageRequests: 0,
+      compressedPaidRequests: 0,
+      compressedActualInputWeighted: 0,
+      compressedOutputWeighted: 0,
+      passthroughPaidRequests: 0,
+      passthroughActualInputWeighted: 0,
+      passthroughOutputWeighted: 0,
+      textCharsMeasured: 0,
+      thinkingCharsMeasured: 0,
+      toolUseCharsMeasured: 0,
+      redactedBlockCountMeasured: 0,
+      eventsWithMeasurement: 0,
+      startedAt: Date.now() / 1000,
+    };
+  }
+  private totals: Totals = this.makeEmptyTotals();
   /** Bounded ring of the most recently rendered images (last IMAGE_RING_CAP).
    *  Each request that rendered an image pushes one entry; the matching
    *  RecentRow carries `img_id` so the dashboard can pull any image still in
@@ -795,11 +800,11 @@ export class DashboardState {
       if (!s) {
         s = {
           sessionId: sid,
-          baselineInputWeighted: 0,
-          actualInputWeighted: 0,
+            baselineInputWeighted: 0,
+            actualInputWeighted: 0,
           baselineMeasuredCount: 0,
-          allActualInputWeighted: 0,
-          allOutputWeighted: 0,
+            allActualInputWeighted: 0,
+            allOutputWeighted: 0,
           rawActualTokens: 0,
           rawBaselineTokens: 0,
           rawOutputTokens: 0,
@@ -854,9 +859,11 @@ export class DashboardState {
 
     const row: RecentRow = {
       ts: Date.now() / 1000,
+      ts_iso: new Date().toISOString(),
       method: ev.method,
       path: ev.path,
       model: ev.model,
+      effort: ev.effort,
       status: ev.status,
       compressed,
       cc_added: compressed ? 1 : undefined,
@@ -1034,10 +1041,12 @@ export class DashboardState {
         }
       }
       const row: RecentRow = {
-        ts: Date.parse(t.ts) / 1000,
+        ts: Number.isFinite(Date.parse(t.ts)) ? Date.parse(t.ts) / 1000 : 0,
+        ts_iso: Number.isFinite(Date.parse(t.ts)) ? new Date(Date.parse(t.ts)).toISOString() : undefined,
         method: t.method,
         path: t.path,
         model: t.model,
+        effort: (t as { effort?: string }).effort,
         status: t.status,
         compressed,
         cc_added: compressed ? 1 : undefined,
@@ -1096,11 +1105,11 @@ export class DashboardState {
     // conversion itself so we don't round-trip pricing through the wire.
     return jsonResponse({
       sessionId: s.sessionId,
-      baselineInputWeighted: s.baselineInputWeighted,
-      actualInputWeighted: s.actualInputWeighted,
+        baselineInputWeighted: s.baselineInputWeighted,
+        actualInputWeighted: s.actualInputWeighted,
       baselineMeasuredCount: s.baselineMeasuredCount,
-      allActualInputWeighted: s.allActualInputWeighted,
-      allOutputWeighted: s.allOutputWeighted,
+        allActualInputWeighted: s.allActualInputWeighted,
+        allOutputWeighted: s.allOutputWeighted,
       rawActualTokens: s.rawActualTokens,
       rawBaselineTokens: s.rawBaselineTokens,
       rawOutputTokens: s.rawOutputTokens,
@@ -1429,6 +1438,20 @@ export class DashboardState {
     });
   }
 
+  /** POST /api/dashboard/clear — clear in-memory recent rows/previews and reset live counters.
+   *  Persisted JSONL logs are intentionally untouched. */
+  handleDashboardClear(): Response {
+    this.recent = [];
+    this.sessions.clear();
+    this.currentSessionId = null;
+    this.baselineWarmth.clear();
+    this.contextHistory = [];
+    this.images = [];
+    this.totals = this.makeEmptyTotals();
+    return jsonResponse({ ok: true, cleared: 'memory', persisted_logs_deleted: false });
+  }
+
+
   /** POST /api/compression — flip the runtime kill switch.
    *  Body: { enabled: boolean }. Returns the new state. In-memory only;
    *  restart resets to the default (on). */
@@ -1486,6 +1509,7 @@ export type DashboardRoute =
   | { kind: 'api-stats' } // /api/stats.json
   | { kind: 'current-session' } // /api/current-session.json
   | { kind: 'api-compression' } // /api/compression (POST {enabled}) — runtime kill switch
+  | { kind: 'api-dashboard-clear' } // /api/dashboard/clear (POST) — reset live dashboard memory
   | { kind: 'api-image-source' } // /api/image-source[?id=N] — source text behind a rendered PNG
   | { kind: 'fragment'; name: string }; // /fragments/<name> — server-rendered htmx panels
 
@@ -1499,6 +1523,7 @@ export function dashboardPath(pathname: string): DashboardRoute | null {
   if (pathname === '/api/stats.json') return { kind: 'api-stats' };
   if (pathname === '/api/current-session.json') return { kind: 'current-session' };
   if (pathname === '/api/compression') return { kind: 'api-compression' };
+  if (pathname === '/api/dashboard/clear') return { kind: 'api-dashboard-clear' };
   if (pathname === '/api/image-source') return { kind: 'api-image-source' };
   if (pathname.startsWith('/fragments/')) {
     return { kind: 'fragment', name: pathname.slice('/fragments/'.length) };

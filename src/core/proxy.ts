@@ -40,6 +40,8 @@ export interface ProxyEvent {
   path: string;
   /** Top-level request model when present. Used for telemetry/dashboard labels only. */
   model?: string;
+  /** Request effort/reasoning-effort when the upstream request shape exposes it. */
+  effort?: string;
   status: number;
   /** Wall-clock ms from request start to event fire (≈ end of upstream body). */
   durationMs: number;
@@ -81,6 +83,28 @@ function readModelField(body: Uint8Array): string | null {
   } catch {
     return null;
   }
+}
+
+/** Best-effort extraction of model effort from common request shapes. */
+function readEffortField(body: Uint8Array): string | undefined {
+  try {
+    const obj = JSON.parse(new TextDecoder().decode(body)) as Record<string, unknown>;
+    const direct = obj.reasoning_effort ?? obj.effort;
+    if (typeof direct === 'string' && direct.length > 0) return direct;
+    const reasoning = obj.reasoning;
+    if (reasoning && typeof reasoning === 'object') {
+      const effort = (reasoning as Record<string, unknown>).effort;
+      if (typeof effort === 'string' && effort.length > 0) return effort;
+    }
+    const thinking = obj.thinking;
+    if (thinking && typeof thinking === 'object') {
+      const budget = (thinking as Record<string, unknown>).budget_tokens;
+      if (typeof budget === 'number' && Number.isFinite(budget)) return `budget_tokens:${budget}`;
+    }
+  } catch {
+    // Ignore malformed/non-JSON bodies; effort is optional telemetry only.
+  }
+  return undefined;
 }
 
 /** Gzip via CompressionStream — available in Node 18+ and Cloudflare Workers. */
@@ -674,6 +698,7 @@ export function createProxy(config: ProxyConfig = {}) {
           method: req.method,
           path: url.pathname,
           model: requestModel,
+          effort: requestEffort,
           status,
           durationMs: Date.now() - t0,
           firstByteMs,
@@ -705,6 +730,7 @@ export function createProxy(config: ProxyConfig = {}) {
     let bodyOut: BodyInit | null = null;
     let info: TransformInfo | undefined;
     let requestModel: string | undefined;
+    let requestEffort: string | undefined;
 
     // Two count_tokens probes on the pre-compression body (see docs/HISTORY_CACHE_MODEL.md):
     //   baselinePromise          → full-body input_tokens
@@ -722,6 +748,7 @@ export function createProxy(config: ProxyConfig = {}) {
         // Fail-closed: unreadable model → no compression, not a risky guess.
         const model = readModelField(bodyIn);
         requestModel = model ?? undefined;
+        requestEffort = readEffortField(bodyIn);
         const modelOk = isMessages
           ? isPxpipeSupportedModel(model)
           : isPxpipeSupportedGptModel(model);

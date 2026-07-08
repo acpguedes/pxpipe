@@ -88,6 +88,39 @@ describe('dashboardPath()', () => {
   });
 });
 
+
+  it('includes timestamp and effort metadata in recent JSON and rendered rows, and clears live memory', async () => {
+    dash.update({
+      method: 'POST',
+      path: '/v1/messages',
+      model: 'gpt-5.5',
+      effort: 'high',
+      status: 200,
+      durationMs: 10,
+      info: { compressed: true },
+      usage: { input_tokens: 100, output_tokens: 5 },
+    });
+
+    const recent = (await dash.serveRecent().json()) as RecentPayload;
+    expect(recent.recent).toHaveLength(1);
+    expect(recent.recent[0]!.ts).toBeGreaterThan(0);
+    expect(recent.recent[0]!.ts_iso).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(recent.recent[0]!.effort).toBe('high');
+
+    const html = await (await dash.serveFragment('recent', new URL('http://x/fragments/recent'), 4711)).text();
+    expect(html).toContain('Effort');
+    expect(html).toContain('raw effort: high');
+    expect(html).toContain('high');
+
+    const cleared = await dash.handleDashboardClear().json();
+    expect(cleared.persisted_logs_deleted).toBe(false);
+    const afterRecent = (await dash.serveRecent().json()) as RecentPayload;
+    expect(afterRecent.recent).toEqual([]);
+    const afterStats = (await dash.serveStats().json()) as StatsPayload;
+    expect(afterStats.requests).toBe(0);
+    expect(afterStats.compressed_requests).toBe(0);
+  });
+
 // ---- /api/sessions.json --------------------------------------------------
 
 describe('serveSessionsJson', () => {
