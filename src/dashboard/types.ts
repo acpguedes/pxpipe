@@ -82,6 +82,8 @@ export interface RecentRow {
   session_saved_so_far_delta?: number;
   img_id?: number;
   img_ids?: number[];
+  decision_summaries?: Array<{ site: string; text_chars?: number; estimated_text_tokens?: number; estimated_image_tokens?: number; decision: string; bucket?: string }>;
+  warnings?: string[];
 }
 
 /** /api/sessions.json payload. */
@@ -140,6 +142,12 @@ export interface FullStatsSummary {
   durationP95: number;
   firstByteP50: number;
   firstByteP95: number;
+  passthroughReasonCounts?: [string, number][];
+  unknownTags?: [string, number][];
+  churningTags?: [string, number][];
+  truncationCount?: number;
+  droppedCodepoints?: number;
+  imageTextTokenDelta?: number;
 }
 
 /** POST /api/compression response. */

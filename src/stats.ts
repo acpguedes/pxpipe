@@ -48,6 +48,11 @@ export interface Summary {
    *  be doing its job. */
   systemShaHist: Map<string, number>;
   unknownTags: Map<string, number>;
+  churningTags: Map<string, number>;
+  passthroughReasonCounts: Map<string, number>;
+  truncationCount: number;
+  droppedCodepoints: number;
+  imageTextTokenDelta: number;
   bucketStats: Map<BucketName, { samples: number; chars: number; estimatedTokens: number }>;
 }
 
@@ -73,6 +78,11 @@ export function newSummary(): Summary {
     byCwd: new Map(),
     systemShaHist: new Map(),
     unknownTags: new Map(),
+    churningTags: new Map(),
+    passthroughReasonCounts: new Map(),
+    truncationCount: 0,
+    droppedCodepoints: 0,
+    imageTextTokenDelta: 0,
     bucketStats: new Map(),
   };
 }
@@ -148,6 +158,21 @@ export function fold(s: Summary, ev: TrackEvent): Summary {
       s.unknownTags.set(t, (s.unknownTags.get(t) ?? 0) + 1);
     }
   }
+  if (ev.churning_static_tags) {
+    for (const t of ev.churning_static_tags) {
+      s.churningTags.set(t, (s.churningTags.get(t) ?? 0) + 1);
+    }
+  }
+  if (ev.passthrough_reasons) {
+    for (const [reason, count] of Object.entries(ev.passthrough_reasons)) {
+      if (typeof count === 'number' && count > 0) {
+        s.passthroughReasonCounts.set(reason, (s.passthroughReasonCounts.get(reason) ?? 0) + count);
+      }
+    }
+  }
+  s.truncationCount += ev.truncated_tool_results ?? 0;
+  s.droppedCodepoints += ev.dropped_chars ?? 0;
+  s.imageTextTokenDelta += (ev.baseline_imaged_tokens ?? 0) - (ev.image_tokens ?? 0);
 
   return s;
 }
@@ -266,6 +291,31 @@ export function renderTextReport(s: Summary): string {
     lines.push('');
   }
 
+  if (s.passthroughReasonCounts.size > 0) {
+    lines.push('passthrough reason counters:');
+    for (const [reason, count] of [...s.passthroughReasonCounts.entries()].sort((a, b) => b[1] - a[1])) {
+      lines.push(`  ${count.toString().padStart(6)}  ${reason}`);
+    }
+    lines.push('');
+  }
+
+  if (s.truncationCount > 0 || s.droppedCodepoints > 0 || s.imageTextTokenDelta !== 0) {
+    lines.push('decision telemetry:');
+    lines.push(`  truncated tool_results: ${fmtN(s.truncationCount)}`);
+    lines.push(`  dropped codepoints:      ${fmtN(s.droppedCodepoints)}`);
+    lines.push(`  image-vs-text token Δ:   ${fmtN(s.imageTextTokenDelta)}`);
+    lines.push('');
+  }
+
+  if (s.churningTags.size > 0) {
+    lines.push('⚠  churning static-slab tags observed:');
+    for (const [tag, count] of [...s.churningTags.entries()].sort((a, b) => b[1] - a[1])) {
+      lines.push(`  ${count.toString().padStart(6)}  <${tag}>`);
+    }
+    lines.push('  → classify each tag as dynamic or known-static; enable PXPIPE_FAILSAFE_DYNAMIC_TAGS=1 to skip uncertain slabs');
+    lines.push('');
+  }
+
   if (s.unknownTags.size > 0) {
     lines.push('⚠  unknown tag-shaped blocks observed in static slab:');
     const top = [...s.unknownTags.entries()].sort((a, b) => b[1] - a[1]);
@@ -349,6 +399,11 @@ export function summaryToJson(s: Summary): Record<string, unknown> {
     byCwd: topN(s.byCwd),
     systemShaHist: topN(s.systemShaHist),
     unknownTags: topN(s.unknownTags),
+    churningTags: topN(s.churningTags),
+    passthroughReasonCounts: topN(s.passthroughReasonCounts),
+    truncationCount: s.truncationCount,
+    droppedCodepoints: s.droppedCodepoints,
+    imageTextTokenDelta: s.imageTextTokenDelta,
     bucketStats: topN(s.bucketStats),
   };
 }

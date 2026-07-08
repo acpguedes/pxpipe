@@ -1504,6 +1504,22 @@ describe('transform', () => {
     expect(info.unknownStaticTags).not.toContain('env');
   });
 
+  it('can opt out of slab compression when an unknown tag churns', async () => {
+    const makeBody = (value: string) => new TextEncoder().encode(
+      JSON.stringify({
+        model: 'claude',
+        messages: [{ role: 'user', content: 'same first user' }],
+        system: 'claude.md\n'.repeat(400) + `<recent_files>\n${value}\n</recent_files>\n`,
+      }),
+    );
+    await transformRequest(makeBody('a.ts'), { failSafeDynamicTags: true });
+    const { info } = await transformRequest(makeBody('b.ts'), { failSafeDynamicTags: true });
+    expect(info.churningStaticTags).toContain('recent_files');
+    expect(info.compressed).toBe(false);
+    expect(info.reason).toMatch(/dynamic_tag_uncertain/);
+    expect(info.passthroughReasons?.dynamic_tag_uncertain).toBe(1);
+  });
+
   it('does not flag <types> as an unknown tag (it lives in KNOWN_STATIC_TAGS)', async () => {
     const sys =
       'claude.md\n'.repeat(400) +
