@@ -73,7 +73,7 @@ export interface TrackEvent {
    *  Undefined on uncompressed requests; enables per-bucket cpt regression. */
   bucket_chars?: Partial<Record<
     'static_slab' | 'reminder' |
-    'tool_result_structured' | 'tool_result_log' | 'tool_result_prose' |
+    'tool_result_json' | 'tool_result_log' | 'tool_result_prose' |
     'history',
     number
   >>;

@@ -14,6 +14,7 @@
 import * as fs from 'node:fs';
 import * as readline from 'node:readline';
 import type { TrackEvent } from './core/tracker.js';
+import type { BucketName } from './core/transform.js';
 
 // ---- pure aggregator ------------------------------------------------------
 
@@ -47,6 +48,7 @@ export interface Summary {
    *  be doing its job. */
   systemShaHist: Map<string, number>;
   unknownTags: Map<string, number>;
+  bucketStats: Map<BucketName, { samples: number; chars: number; estimatedTokens: number }>;
 }
 
 export function newSummary(): Summary {
@@ -71,6 +73,7 @@ export function newSummary(): Summary {
     byCwd: new Map(),
     systemShaHist: new Map(),
     unknownTags: new Map(),
+    bucketStats: new Map(),
   };
 }
 
@@ -117,6 +120,27 @@ export function fold(s: Summary, ev: TrackEvent): Summary {
 
   if (ev.system_sha8) {
     s.systemShaHist.set(ev.system_sha8, (s.systemShaHist.get(ev.system_sha8) ?? 0) + 1);
+  }
+
+  if (ev.bucket_chars) {
+    const bucketChars = ev.bucket_chars as Partial<Record<BucketName, number>>;
+    const totalBucketChars = Object.values(bucketChars).reduce(
+      (sum, n) => sum + (typeof n === 'number' && n > 0 ? n : 0),
+      0,
+    );
+    const tokenBasis = ev.baseline_imaged_tokens ?? ev.baseline_tokens;
+    const eventCpt =
+      totalBucketChars > 0 && typeof tokenBasis === 'number' && tokenBasis > 0
+        ? totalBucketChars / tokenBasis
+        : undefined;
+    for (const [bucket, chars] of Object.entries(bucketChars) as Array<[BucketName, number]>) {
+      if (typeof chars !== 'number' || chars <= 0) continue;
+      const current = s.bucketStats.get(bucket) ?? { samples: 0, chars: 0, estimatedTokens: 0 };
+      current.samples++;
+      current.chars += chars;
+      if (eventCpt !== undefined) current.estimatedTokens += chars / eventCpt;
+      s.bucketStats.set(bucket, current);
+    }
   }
 
   if (ev.unknown_static_tags) {
@@ -217,6 +241,18 @@ export function renderTextReport(s: Summary): string {
     lines.push('');
   }
 
+  if (s.bucketStats.size > 0) {
+    lines.push('adaptive chars/token buckets:');
+    const top = [...s.bucketStats.entries()].sort((a, b) => b[1].chars - a[1].chars);
+    for (const [bucket, e] of top) {
+      const cpt = e.estimatedTokens > 0 ? (e.chars / e.estimatedTokens).toFixed(2) : '—';
+      lines.push(
+        `  ${bucket.padEnd(18)} samples=${fmtN(e.samples).padStart(6)}  chars=${fmtN(e.chars).padStart(12)}  est_cpt=${cpt}`,
+      );
+    }
+    lines.push('');
+  }
+
   if (s.systemShaHist.size > 0) {
     lines.push('top system prompts (system_sha8, high count = cache reuse):');
     const top = [...s.systemShaHist.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
@@ -313,5 +349,6 @@ export function summaryToJson(s: Summary): Record<string, unknown> {
     byCwd: topN(s.byCwd),
     systemShaHist: topN(s.systemShaHist),
     unknownTags: topN(s.unknownTags),
+    bucketStats: topN(s.bucketStats),
   };
 }

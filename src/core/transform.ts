@@ -90,6 +90,8 @@ export interface TransformOptions {
   multiCol?: number;
   /** Chars-per-token assumption for `isCompressionProfitable()`. Default 4. */
   charsPerToken?: number;
+  /** Bucket-specific chars-per-token overrides for adaptive compression gates. */
+  bucketCharsPerToken?: Partial<Record<BucketName, number>>;
   /** Multi-turn amortization horizon for the history-collapse gate. N≥2 evaluates as
    *  if N future turns share the prefix (worst-case-warm-image vs best-case-warm-text).
    *  Default 1 (per-turn cold gate). See docs/HISTORY_CACHE_MODEL.md. */
@@ -138,6 +140,7 @@ const DEFAULTS: Required<TransformOptions> = {
   cols: 313,
   maxImagesPerToolResult: 10,
   charsPerToken: 4,
+  bucketCharsPerToken: {},
   historyAmortizationHorizon: 1,
   priorWarmTokens: 0,
   priorWarmImageTokens: 0,
@@ -173,6 +176,7 @@ const READ_FIRST_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit']);
 /** Empirical cpt for the history-collapse path (same Opus 4.7 telemetry as SLAB_CHARS_PER_TOKEN).
  *  History is even denser (tool_use JSON dominates), so 2.0 is doubly conservative. */
 export const HISTORY_CHARS_PER_TOKEN = 2.0;
+
 
 /** Chars-per-token for the `pxpipe export` *reporting* estimate (factsheet & savings %).
  *  Less conservative than the gate's CHARS_PER_TOKEN=4: reporting wants an accurate
@@ -458,10 +462,30 @@ export type BucketName =
   | 'tool_result_prose'
   | 'history';
 
+
+/** Conservative learned-default chars/token priors used only when callers do not
+ * provide `charsPerToken` or a bucket-specific override. Operators can replace
+ * these from `pxpipe stats` bucket telemetry once they have enough samples. */
+export const DEFAULT_BUCKET_CHARS_PER_TOKEN: Readonly<Record<BucketName, number>> = {
+  static_slab: SLAB_CHARS_PER_TOKEN,
+  reminder: CHARS_PER_TOKEN,
+  tool_result_json: 2.0,
+  tool_result_log: 3.0,
+  tool_result_prose: CHARS_PER_TOKEN,
+  history: HISTORY_CHARS_PER_TOKEN,
+};
+
 /** Pre-compaction TEXT char totals per bucket. Absent when no bucket fired. */
 export type BucketChars = Partial<Record<BucketName, number>>;
 
 /** Attribute `chars` to a compression bucket (called whether gate accepted or rejected). */
+function bucketCpt(o: Required<TransformOptions>, opts: TransformOptions, bucket: BucketName): number {
+  const override = o.bucketCharsPerToken[bucket];
+  if (Number.isFinite(override) && override! > 0) return override!;
+  if (opts.charsPerToken !== undefined) return o.charsPerToken;
+  return DEFAULT_BUCKET_CHARS_PER_TOKEN[bucket] ?? CHARS_PER_TOKEN;
+}
+
 function bumpBucket(info: TransformInfo, bucket: BucketName, chars: number): void {
   if (chars <= 0) return;
   if (!info.bucketChars) info.bucketChars = {};
@@ -1372,9 +1396,7 @@ async function runHistoryCollapseAndFinalize(
 ): Promise<{ body: Uint8Array; info: TransformInfo; collapsed: boolean }> {
   let collapsedFlag = false;
   if (Array.isArray(req.messages) && req.messages.length > 0) {
-    const historyCpt = opts.charsPerToken !== undefined
-      ? o.charsPerToken
-      : HISTORY_CHARS_PER_TOKEN;
+    const historyCpt = bucketCpt(o, opts, 'history');
     const horizon = Math.max(1, Math.floor(o.historyAmortizationHorizon));
     // Pass the symmetric warm-cache burn through to the history-collapse
     // gate as well. The slab gate alone got the symmetric treatment, which
@@ -1607,6 +1629,7 @@ export async function transformRequest(
   const combined = maybeReflow(compactSlabWhitespace(combinedRaw), o.reflow);
   info.origChars = combinedRaw.length;
   info.compressedChars = 0;
+  bumpBucket(info, 'static_slab', combinedRaw.length);
   if (combined) info.systemSha8 = await sha8(combined);
 
   if (combined.length < o.minCompressChars) {
@@ -1634,9 +1657,7 @@ export async function transformRequest(
   // Gate geometry for dense single-col (tool_result/reminder) paths — 384-col/240-row.
   const denseGeo = denseGateGeometry(o.cols, numCols);
   // Use slab cpt (2.0) unless host pinned charsPerToken explicitly.
-  const slabCpt = opts.charsPerToken !== undefined
-    ? o.charsPerToken
-    : SLAB_CHARS_PER_TOKEN;
+  const slabCpt = bucketCpt(o, opts, 'static_slab');
   // Shrink canvas to longest actual line — pure function of (text, cols) so the
   // cache prefix stays byte-identical across turns. The banner sets a natural width floor.
   const reflowNoteImg = o.reflow
@@ -1719,7 +1740,6 @@ export async function transformRequest(
   info.imageCount = imageBlocks.length;
   // Credit raw (pre-compaction) length — what Anthropic would have billed.
   info.compressedChars += combinedRaw.length;
-  bumpBucket(info, 'static_slab', combinedRaw.length);
   if (images.length > 0) {
     info.firstImagePng = images[0]!.png;
     info.firstImageWidth = images[0]!.width;
@@ -1785,6 +1805,7 @@ export async function transformRequest(
             processedExisting.push(blk);
             continue;
           }
+          bumpBucket(info, 'reminder', (blk as TextBlock).text.length);
           // Caller fidelity override: pin this block as text, skip imaging.
           if (callerKeepsSharp(o.keepSharp, { kind: 'reminder', text: (blk as TextBlock).text })) {
             bumpPassthrough(info, 'kept_sharp');
@@ -1806,7 +1827,7 @@ export async function transformRequest(
           // model reads.
           const reminderRaw = (blk as TextBlock).text;
           const reminderText = maybeReflow(compactSlabWhitespace(reminderRaw), o.reflow);
-          if (!isCompressionProfitable(reminderText, denseGeo.cols, undefined, numCols, o.charsPerToken, 0, 0, true, denseGeo.maxChars)) {
+          if (!isCompressionProfitable(reminderText, denseGeo.cols, undefined, numCols, bucketCpt(o, opts, 'reminder'), 0, 0, true, denseGeo.maxChars)) {
             bumpPassthrough(info, 'not_profitable');
             processedExisting.push(blk);
             continue;
@@ -1835,7 +1856,6 @@ export async function transformRequest(
             imageCount: imgs.length,
           });
           info.compressedChars += reminderRaw.length;
-          bumpBucket(info, 'reminder', reminderRaw.length);
           info.imageCount += imgs.length;
           info.droppedChars = (info.droppedChars ?? 0) + droppedChars;
           for (const [cp, n] of dcp) {
@@ -1871,6 +1891,8 @@ export async function transformRequest(
             }
             const innerRaw = tr.content;
             if (typeof innerRaw === 'string') {
+              const bucket = toolResultBucket(classifyContent(innerRaw));
+              bumpBucket(info, bucket, innerRaw.length);
               // Caller fidelity override: pin this tool_result as text.
               if (callerKeepsSharp(o.keepSharp, { kind: 'tool_result', text: innerRaw, toolUseId: tr.tool_use_id })) {
                 bumpPassthrough(info, 'kept_sharp');
@@ -1884,7 +1906,7 @@ export async function transformRequest(
               if (innerR.length < o.minToolResultChars) {
                 bumpPassthrough(info, 'below_threshold');
                 rewritten.push(blk);
-              } else if (!isCompressionProfitable(innerR, denseGeo.cols, o.maxImagesPerToolResult, numCols, o.charsPerToken, 0, 0, true, denseGeo.maxChars)) {
+              } else if (!isCompressionProfitable(innerR, denseGeo.cols, o.maxImagesPerToolResult, numCols, bucketCpt(o, opts, bucket), 0, 0, true, denseGeo.maxChars)) {
                 bumpPassthrough(info, 'not_profitable');
                 rewritten.push(blk);
               } else {
@@ -1919,7 +1941,6 @@ export async function transformRequest(
                   content: trFactSheet ? [...imgs, { type: 'text' as const, text: trFactSheet }] : imgs,
                 });
                 changed = true;
-                bumpBucket(info, toolResultBucket(classifyContent(inner)), innerRaw.length);
               }
             } else if (Array.isArray(innerRaw)) {
               const newInner: Array<TextBlock | ImageBlock> = [];
@@ -1934,6 +1955,8 @@ export async function transformRequest(
                   continue;
                 }
                 const innerTextRaw = (ib as TextBlock).text;
+                const bucket = toolResultBucket(classifyContent(innerTextRaw));
+                bumpBucket(info, bucket, innerTextRaw.length);
                 // Caller fidelity override: pin this tool_result part as text.
                 if (callerKeepsSharp(o.keepSharp, { kind: 'tool_result_part', text: innerTextRaw, toolUseId: tr.tool_use_id })) {
                   bumpPassthrough(info, 'kept_sharp');
@@ -1950,7 +1973,7 @@ export async function transformRequest(
                   newInner.push(ib as TextBlock | ImageBlock);
                   continue;
                 }
-                if (!isCompressionProfitable(innerTextR, denseGeo.cols, o.maxImagesPerToolResult, numCols, o.charsPerToken, 0, 0, true, denseGeo.maxChars)) {
+                if (!isCompressionProfitable(innerTextR, denseGeo.cols, o.maxImagesPerToolResult, numCols, bucketCpt(o, opts, bucket), 0, 0, true, denseGeo.maxChars)) {
                   bumpPassthrough(info, 'not_profitable');
                   newInner.push(ib as TextBlock | ImageBlock);
                   continue;
@@ -1990,7 +2013,6 @@ export async function transformRequest(
                 for (const [cp, n] of dcp) {
                   droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
                 }
-                bumpBucket(info, toolResultBucket(classifyContent(innerText)), innerTextRaw.length);
                 innerChanged = true;
               }
               if (innerChanged) {
@@ -2018,9 +2040,7 @@ export async function transformRequest(
   // protectedPrefix excludes the slab-bearing first user message — collapsing it
   // would reduce slab images to [image] placeholders and destroy the cache anchor.
   if (Array.isArray(req.messages) && req.messages.length > 0) {
-    const historyCpt = opts.charsPerToken !== undefined
-      ? o.charsPerToken
-      : HISTORY_CHARS_PER_TOKEN;
+    const historyCpt = bucketCpt(o, opts, 'history');
     const horizon = Math.max(1, Math.floor(o.historyAmortizationHorizon));
     const historyProfitable = (text: string, cols: number): boolean => {
       // Gate at dense 384-col/240-row geometry (matches history.ts renderer).

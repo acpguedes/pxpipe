@@ -105,6 +105,25 @@ describe('stats aggregator', () => {
     expect(s.unknownTags.get('todo_list')).toBe(1);
   });
 
+
+  it('aggregates adaptive bucket samples and estimated chars per token', () => {
+    const s = newSummary();
+    fold(s, ev({ bucket_chars: { static_slab: 2000, tool_result_json: 1000 }, baseline_imaged_tokens: 1000 }));
+    fold(s, ev({ bucket_chars: { static_slab: 4000 }, baseline_tokens: 2000 }));
+
+    expect(s.bucketStats.get('static_slab')?.samples).toBe(2);
+    expect(s.bucketStats.get('static_slab')?.chars).toBe(6000);
+    expect(s.bucketStats.get('static_slab')?.estimatedTokens).toBeCloseTo(2666.67, 2);
+    expect(s.bucketStats.get('tool_result_json')?.samples).toBe(1);
+    expect(s.bucketStats.get('tool_result_json')?.chars).toBe(1000);
+    expect(s.bucketStats.get('tool_result_json')?.estimatedTokens).toBeCloseTo(333.33, 2);
+
+    const out = renderTextReport(s);
+    expect(out).toContain('adaptive chars/token buckets');
+    expect(out).toContain('static_slab');
+    expect(out).toContain('est_cpt=2.25');
+  });
+
   it('renders a non-empty text report for a populated summary', () => {
     const s = newSummary();
     for (let i = 0; i < 100; i++) {
