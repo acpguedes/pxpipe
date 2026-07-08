@@ -52,6 +52,7 @@ export interface Summary {
   passthroughReasonCounts: Map<string, number>;
   truncationCount: number;
   droppedCodepoints: number;
+  droppedCodepointsTop: Map<string, number>;
   imageTextTokenDelta: number;
   bucketStats: Map<BucketName, { samples: number; chars: number; estimatedTokens: number }>;
 }
@@ -82,6 +83,7 @@ export function newSummary(): Summary {
     passthroughReasonCounts: new Map(),
     truncationCount: 0,
     droppedCodepoints: 0,
+    droppedCodepointsTop: new Map(),
     imageTextTokenDelta: 0,
     bucketStats: new Map(),
   };
@@ -172,6 +174,13 @@ export function fold(s: Summary, ev: TrackEvent): Summary {
   }
   s.truncationCount += ev.truncated_tool_results ?? 0;
   s.droppedCodepoints += ev.dropped_chars ?? 0;
+  if (ev.dropped_codepoints_top) {
+    for (const [cp, count] of Object.entries(ev.dropped_codepoints_top)) {
+      if (typeof count === 'number' && count > 0) {
+        s.droppedCodepointsTop.set(cp, (s.droppedCodepointsTop.get(cp) ?? 0) + count);
+      }
+    }
+  }
   s.imageTextTokenDelta += (ev.baseline_imaged_tokens ?? 0) - (ev.image_tokens ?? 0);
 
   return s;
@@ -304,6 +313,13 @@ export function renderTextReport(s: Summary): string {
     lines.push(`  truncated tool_results: ${fmtN(s.truncationCount)}`);
     lines.push(`  dropped codepoints:      ${fmtN(s.droppedCodepoints)}`);
     lines.push(`  image-vs-text token Δ:   ${fmtN(s.imageTextTokenDelta)}`);
+    if (s.droppedCodepointsTop.size > 0) {
+      lines.push('  top dropped codepoints:');
+      for (const [cp, count] of [...s.droppedCodepointsTop.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20)) {
+        lines.push(`    ${count.toString().padStart(6)}  ${cp}`);
+      }
+      lines.push('  → run scripts/report-dropped-codepoints.ts against the same events log to plan atlas additions');
+    }
     lines.push('');
   }
 
@@ -403,6 +419,7 @@ export function summaryToJson(s: Summary): Record<string, unknown> {
     passthroughReasonCounts: topN(s.passthroughReasonCounts),
     truncationCount: s.truncationCount,
     droppedCodepoints: s.droppedCodepoints,
+    droppedCodepointsTop: topN(s.droppedCodepointsTop),
     imageTextTokenDelta: s.imageTextTokenDelta,
     bucketStats: topN(s.bucketStats),
   };

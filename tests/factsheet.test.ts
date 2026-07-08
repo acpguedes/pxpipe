@@ -120,3 +120,19 @@ describe('ticket-style codes and occurrence counts', () => {
     expect(hit!.count).toBe(5);
   });
 });
+
+describe('expanded identifier extraction', () => {
+  it('captures function/class names, command names, package/module names, and URLs', () => {
+    const toks = extractFactSheetTokens([
+      'function parseRoadmapItem() calls node:fs.promises and React.useMemo',
+      'class ModelProfileValidator handles ERR_PROFILE_UNSAFE at https://example.com/docs/profile',
+      'run pnpm test:unit before importing @scope/pkg-name',
+    ].join('\n'));
+    expect(toks).toContain('parseRoadmapItem');
+    expect(toks).toContain('ModelProfileValidator');
+    expect(toks).toContain('node:fs.promises');
+    expect(toks).toContain('React.useMemo');
+    expect(toks).toContain('test:unit');
+    expect(toks).toContain('https://example.com/docs/profile');
+  });
+});

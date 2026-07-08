@@ -21,8 +21,14 @@ const PATTERNS: readonly RegExp[] = [
   /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, // UUID
   /(?:[\w@~+-]+)?(?:\/[\w.@+-]+)+\.[A-Za-z]\w{0,8}\b/g, // path with a file extension (multi-dot ok: .test.ts)
   /\/[\w.@+-]+(?:\/[\w.@+-]+)+\/?/g, // dir path (>=2 segments)
+  /\b(?:[A-Za-z_$][\w$]*:)?(?:[A-Za-z_$][\w$]*\.){1,}[A-Za-z_$][\w$]*\b/g, // package/module/member paths (node:fs.promises, React.useMemo)
   /\b(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b/g, // git sha / long hex (must contain a digit)
   /\bv?\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?\b/g, // version string
+  /\b[A-Za-z_$][\w$]*(?:\(\)|#[A-Za-z_$][\w$]*|::[A-Za-z_$][\w$]*)\b/g, // commands/functions/classes with call/member markers
+  /\b(?:class|interface|type|function|def|func|struct|enum)\s+([A-Za-z_$][\w$]{2,})\b/g, // declarations
+  /\b(?:npm|pnpm|yarn|cargo|pip|go|npx|uvx|tsx|node)\s+(?:run\s+)?([A-Za-z][\w:.-]{2,})\b/g, // command/package names
+  /\b[A-Za-z][\w.-]*:[A-Za-z][\w.-]*\b/g, // script/command names (test:unit)
+  /\b[A-Za-z_$][\w$]*[A-Z][\w$]*\b/g, // camel/Pascal identifiers
   /(?:^|[^\w-])(--?[A-Za-z][\w-]+)/g, // CLI flag (token in capture group 1)
   /\b\d[\d,_]{3,}\b/g, // large / separated number
   /\b\d+\.\d+\b/g, // decimal
@@ -55,6 +61,8 @@ const SHAPE_TICKET = /^(?=[A-Z0-9-]*\d)[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+$/; // PROJ-
 const SHAPE_FLAG = /^--?[A-Za-z][\w-]+$/; // CLI flag
 const SHAPE_NUM = /^\d[\d,_]*$|^\d+\.\d+$/; // port / large or separated number / decimal
 const SHAPE_URL = /^https?:\/\//;
+const SHAPE_CAMEL = /^[A-Za-z_$][\w$]*(?:[A-Z][\w$]*|\(\)|#|::)/;
+const SHAPE_MODULE = /^(?:[A-Za-z_$][\w$]*:)?(?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*$/;
 
 /** Lower tier = higher keep-priority. Pure function of the token → deterministic. */
 function priorityTier(tok: string): 0 | 1 | 2 {
@@ -64,7 +72,9 @@ function priorityTier(tok: string): 0 | 1 | 2 {
     SHAPE_CONST.test(tok) ||
     SHAPE_TICKET.test(tok) ||
     SHAPE_FLAG.test(tok) ||
-    SHAPE_NUM.test(tok)
+    SHAPE_NUM.test(tok) ||
+    SHAPE_CAMEL.test(tok) ||
+    SHAPE_MODULE.test(tok)
   ) {
     return 0;
   }
