@@ -123,7 +123,10 @@ export interface TransformOptions {
    *  for every block rendered to images. Off by default (entries inflate `info`;
    *  only a stateful harness can use them). */
   emitRecoverable?: boolean;
+  /** Opt-in safety: when a previously unknown static-slab tag is observed churning within a session, skip slab compression. */
+  failSafeDynamicTags?: boolean;
 }
+
 
 const DEFAULTS: Required<TransformOptions> = {
   compress: true,
@@ -149,6 +152,7 @@ const DEFAULTS: Required<TransformOptions> = {
   reflow: true,
   keepSharp: () => false,
   emitRecoverable: false,
+  failSafeDynamicTags: false,
   // GPT-only knobs; the Anthropic transform ignores them but Required<> needs them.
   collapseHistory: true,
   gptHistory: {},
@@ -433,7 +437,7 @@ export function isCompressionProfitableAmortized(
 /** Increment a passthrough-reason counter on `info`. Lazily allocates `passthroughReasons`. */
 function bumpPassthrough(
   info: TransformInfo,
-  reason: 'below_threshold' | 'not_profitable' | 'kept_sharp',
+  reason: 'below_threshold' | 'not_profitable' | 'kept_sharp' | 'dynamic_tag_uncertain',
 ): void {
   if (!info.passthroughReasons) info.passthroughReasons = {};
   info.passthroughReasons[reason] = (info.passthroughReasons[reason] ?? 0) + 1;
@@ -574,7 +578,7 @@ export interface TransformInfo {
   /** Top dropped codepoints by frequency (`U+HHHH` → count), at most 20 entries. */
   droppedCodepointsTop?: Record<string, number>;
   /** Why blocks passed through without compression. Only present when count > 0. */
-  passthroughReasons?: { below_threshold?: number; not_profitable?: number; kept_sharp?: number };
+  passthroughReasons?: { below_threshold?: number; not_profitable?: number; kept_sharp?: number; dynamic_tag_uncertain?: number };
   /** Slab gate diagnostics — imageTokens, textTokens, burn terms, and verdict.
    *  Lets hosts measure flap-prevention efficacy and tune amortization horizon. */
   gateEval?: {
@@ -1549,6 +1553,14 @@ export async function transformRequest(
       staticTagContents,
     );
     if (churning.length > 0) info.churningStaticTags = churning;
+    if (o.failSafeDynamicTags && unknownTags.length > 0) {
+      const uncertain = churning.filter((tag) => unknownTags.includes(tag));
+      if (uncertain.length > 0) {
+        info.reason = `dynamic_tag_uncertain (${uncertain.join(',')})`;
+        bumpPassthrough(info, 'dynamic_tag_uncertain');
+        return { body, info };
+      }
+    }
   }
 
   // 2. Move tool docs into the imaged "Tool Reference", stubbing originals.

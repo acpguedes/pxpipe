@@ -522,6 +522,16 @@ export function renderRecentFragment(p: RecentPayload): string {
             const imaged = e.cc_added
               ? `<span class="badge badge-img">image</span>`
               : `<span class="badge badge-txt">text</span>`;
+            const warnings = (e.warnings ?? []).length > 0
+              ? ` <span class="badge badge-warn" title="${escapeHtml((e.warnings ?? []).join('; '))}">warn</span>`
+              : '';
+            const decisions = (e.decision_summaries ?? []).slice(0, 4).map((d) => {
+              const tok = d.estimated_text_tokens != null && d.estimated_image_tokens != null
+                ? ` · text≈${numFmt(d.estimated_text_tokens)} tok, image≈${numFmt(d.estimated_image_tokens)} tok`
+                : '';
+              return `${d.site}: ${d.decision}${d.bucket ? ` (${d.bucket})` : ''}${d.text_chars != null ? ` · ${numFmt(d.text_chars)} chars` : ''}${tok}`;
+            }).join('\n');
+            const explain = decisions ? ` title="${escapeHtml(decisions)}"` : '';
             return (
               `<tr>` +
               `<td class="muted">${i + 1}</td>` +
@@ -530,7 +540,7 @@ export function renderRecentFragment(p: RecentPayload): string {
               `<td class="endp">${escapeHtml(shortPath(e.path))}</td>` +
               `<td>${e.model ? `<code>${escapeHtml(e.model)}</code>` : '<span class="muted">—</span>'}</td>` +
               `<td>${e.effort ? `<code title="raw effort: ${escapeHtml(e.effort)}">${escapeHtml(e.effort)}</code>` : '<span class="muted">—</span>'}</td>` +
-              `<td>${imaged}</td>` +
+              `<td${explain}>${imaged}${warnings}</td>` +
               `<td class="num">${e.cache_read != null ? numFmt(e.cache_read) : '—'}</td>` +
               `<td class="num">${e.baseline_input != null ? numFmt(e.baseline_input) : '—'}</td>` +
               `<td class="num">${e.actual_input != null ? numFmt(e.actual_input) : '—'}</td>` +

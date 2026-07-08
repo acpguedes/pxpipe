@@ -31,7 +31,7 @@
 import * as fs from 'node:fs';
 import * as readline from 'node:readline';
 import type { ProxyEvent } from './core/proxy.js';
-import type { TrackEvent } from './core/tracker.js';
+import { toTrackEvent, type TrackEvent } from './core/tracker.js';
 import {
   computeActualInputEff,
   computeBaselineInputEff,
@@ -147,6 +147,8 @@ export interface RecentRow {
    *  ring (the id stays on the row but no longer fetches). */
   img_id?: number;
   img_ids?: number[];
+  decision_summaries?: Array<{ site: string; text_chars?: number; estimated_text_tokens?: number; estimated_image_tokens?: number; decision: string; bucket?: string }>;
+  warnings?: string[];
 }
 
 /** Aggregate over the whole session. Reset on process restart unless
@@ -877,6 +879,11 @@ export class DashboardState {
         creditSaving ? round1(baselineInputEff - actualInputEff) : undefined,
       img_id: imgId,
       img_ids: imgIds,
+      decision_summaries: (toTrackEvent({ method: ev.method, path: ev.path, status: ev.status, durationMs: ev.durationMs, info }) as { decision_summaries?: RecentRow['decision_summaries'] }).decision_summaries,
+      warnings: [
+        ...((info?.unknownStaticTags ?? []).map((tag) => `unknown static tag <${tag}>`)),
+        ...((info?.churningStaticTags ?? []).map((tag) => `churning static tag <${tag}>`)),
+      ],
     };
     this.recent.push(row);
     if (this.recent.length > RECENT_CAP) this.recent.splice(0, this.recent.length - RECENT_CAP);
@@ -1061,6 +1068,11 @@ export class DashboardState {
           creditSaving ? round1(baselineInputEff - actualInputEff) : undefined,
         img_id: imgId,
         img_ids: imgId !== undefined ? [imgId] : undefined,
+        decision_summaries: (t as { decision_summaries?: RecentRow['decision_summaries'] }).decision_summaries,
+        warnings: [
+          ...(((t as { unknown_static_tags?: string[] }).unknown_static_tags ?? []).map((tag) => `unknown static tag <${tag}>`)),
+          ...(((t as { churning_static_tags?: string[] }).churning_static_tags ?? []).map((tag) => `churning static tag <${tag}>`)),
+        ],
       };
       this.recent.push(row);
     }

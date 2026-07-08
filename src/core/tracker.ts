@@ -64,7 +64,13 @@ export interface TrackEvent {
   /** Top-20 dropped codepoints (U+HHHH keys) by frequency. Only present when dropped_chars > 0. */
   dropped_codepoints_top?: Record<string, number>;
   /** Blocks that weren't image-compressed this request; only emitted when at least one counter > 0. */
-  passthrough_reasons?: { below_threshold?: number; not_profitable?: number };
+  passthrough_reasons?: { below_threshold?: number; not_profitable?: number; kept_sharp?: number; dynamic_tag_uncertain?: number };
+  decision_summaries?: Array<{
+    site: 'slab' | 'reminder' | 'tool_result' | 'history';
+    text_chars?: number; estimated_text_tokens?: number; estimated_image_tokens?: number;
+    decision: 'compressed' | 'below_threshold' | 'not_profitable' | 'kept_sharp' | 'unsupported_model' | 'disabled' | 'dynamic_tag_uncertain';
+    bucket?: string;
+  }>;
   /** Unrecognized tag names in the static slab — canary for Claude Code releases adding new dynamic tags. */
   unknown_static_tags?: string[];
   /** Slab tags whose content changed within a session — proven per-turn dynamics busting the image cache. */
@@ -164,6 +170,44 @@ export interface Tracker {
   flush?(): void | Promise<void>;
 }
 
+function decisionFromReason(reason: string | undefined, compressed: boolean): NonNullable<TrackEvent['decision_summaries']>[number]['decision'] {
+  if (compressed) return 'compressed';
+  if (!reason) return 'not_profitable';
+  if (reason.startsWith('compress=false')) return 'disabled';
+  if (reason.startsWith('unsupported_model')) return 'unsupported_model';
+  if (reason.startsWith('below_min_chars')) return 'below_threshold';
+  if (reason.startsWith('dynamic_tag_uncertain')) return 'dynamic_tag_uncertain';
+  if (reason.startsWith('not_profitable')) return 'not_profitable';
+  return 'not_profitable';
+}
+
+function buildDecisionSummaries(info: NonNullable<ProxyEvent['info']>): NonNullable<TrackEvent['decision_summaries']> {
+  const out: NonNullable<TrackEvent['decision_summaries']> = [];
+  const bucketChars = info.bucketChars ?? {};
+  const slabChars = bucketChars.static_slab ?? info.origChars;
+  if (slabChars > 0 || info.reason) {
+    out.push({
+      site: 'slab',
+      text_chars: slabChars || undefined,
+      estimated_text_tokens: info.gateEval?.textTokens,
+      estimated_image_tokens: info.gateEval?.imageTokens,
+      decision: decisionFromReason(info.reason, info.compressed),
+      bucket: 'static_slab',
+    });
+  }
+  for (const [bucket, chars] of Object.entries(bucketChars)) {
+    if (bucket === 'static_slab' || chars == null || chars <= 0) continue;
+    out.push({
+      site: bucket === 'history' ? 'history' : bucket === 'reminder' ? 'reminder' : 'tool_result',
+      text_chars: chars,
+      decision: info.compressed ? 'compressed' : decisionFromReason(info.reason, false),
+      bucket,
+    });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
 /** Convert a ProxyEvent to its flat persisted shape. Shared in core so Node/Worker hosts stay in sync. */
 export function toTrackEvent(ev: ProxyEvent): TrackEvent {
   const info = ev.info;
@@ -245,10 +289,12 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     }
     if (info.passthroughReasons) {
       const pr = info.passthroughReasons;
-      if ((pr.below_threshold ?? 0) > 0 || (pr.not_profitable ?? 0) > 0) {
+      if ((pr.below_threshold ?? 0) > 0 || (pr.not_profitable ?? 0) > 0 || (pr.kept_sharp ?? 0) > 0 || (pr.dynamic_tag_uncertain ?? 0) > 0) {
         out.passthrough_reasons = pr;
       }
     }
+    const decisions = buildDecisionSummaries(info);
+    if (decisions.length > 0) out.decision_summaries = decisions;
     if (info.bucketChars && Object.keys(info.bucketChars).length > 0) {
       // Omit empty object so noop-pass requests stay lean; presence means at least one gate fired.
       out.bucket_chars = info.bucketChars;

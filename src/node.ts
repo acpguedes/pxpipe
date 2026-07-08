@@ -919,6 +919,7 @@ async function main(): Promise<void> {
   // rows) showed 5 mode flips ever and losses at 0.8% of wins — all
   // one-time cache-create amortization — so closing the loop would not
   // change decisions. Re-run that reconciliation before wiring one in.
+  const failSafeDynamicTags = ['1', 'true', 'yes', 'on'].includes((process.env.PXPIPE_FAILSAFE_DYNAMIC_TAGS ?? '').toLowerCase());
   const tracker: Tracker = new FileTracker(opts.eventsFile);
 
   // Sidecar dir for oversized 4xx request-body samples. Lives next to the
@@ -958,7 +959,7 @@ async function main(): Promise<void> {
       // (The dashboard kill switch does the same thing at runtime.)
       if (forcePassthrough || !dashboard.getCompressionEnabled()) return { compress: false };
       // Active path: use DEFAULTS in transform.ts for break-even gating.
-      return {};
+      return failSafeDynamicTags ? { failSafeDynamicTags: true } : {};
     },
     onRequest: async (e) => {
       // Feed the dashboard BEFORE tracker.emit — toTrackEvent strips
