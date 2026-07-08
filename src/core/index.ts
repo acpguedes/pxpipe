@@ -34,7 +34,14 @@ export {
   type RecoverableBlock,
 } from './transform.js';
 export { transformOpenAIChatCompletions, transformOpenAIResponses, resolveVisionCost, openAIVisionTokens } from './openai.js';
-export { createProxy, type ProxyConfig, type ProxyEvent } from './proxy.js';
+export {
+  createProxy,
+  type ProxyConfig,
+  type ProxyEvent,
+  type TransformOnlyProvider,
+  type TransformOnlyRequest,
+  type TransformOnlyResponse,
+} from './proxy.js';
 export {
   computeActualInputEff,
   computeBaselineInputEff,

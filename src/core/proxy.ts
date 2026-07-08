@@ -12,6 +12,36 @@ import {
 } from './measurement.js';
 import type { Usage } from './types.js';
 
+
+export type TransformOnlyProvider = 'anthropic' | 'openai-chat' | 'openai-responses';
+
+export interface TransformOnlyRequest {
+  /** Protocol guard for hooks; current value is pxpipe-transform-v1. */
+  protocol?: string;
+  /** Which request shape to transform. If omitted, pxpipe infers from path. */
+  provider?: TransformOnlyProvider;
+  /** Original request path, e.g. /v1/messages or /v1/chat/completions. */
+  path?: string;
+  /** Request model. If omitted, pxpipe reads the top-level JSON model field. */
+  model?: string | null;
+  /** Exact request bytes as base64. Preferred by hooks that need byte preservation. */
+  bodyBase64?: string;
+  /** Convenience JSON body for tests/manual callers. Ignored when bodyBase64 is set. */
+  body?: unknown;
+}
+
+export interface TransformOnlyResponse {
+  protocol: 'pxpipe-transform-v1';
+  applied: boolean;
+  reason: string;
+  detail?: string;
+  model?: string;
+  bodyBase64: string;
+  /** Present when the transformed body is valid JSON. */
+  body?: unknown;
+  info: TransformInfo;
+}
+
 export interface ProxyConfig {
   /** 'cloudflare-ai-gateway': routes both families through gatewayBaseUrl;
    *  OpenAI paths drop the `/v1` prefix to match gateway shape. */
@@ -513,6 +543,120 @@ const STRIP_RES_HEADERS = new Set([
   'content-length',   // body may differ after streaming
 ]);
 
+
+function bytesToBase64Local(bytes: Uint8Array): string {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytesLocal(s: string): Uint8Array {
+  const binary = atob(s);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function providerFromPath(pathname: string): TransformOnlyProvider | undefined {
+  let pathOnly = pathname;
+  try {
+    pathOnly = new URL(pathname).pathname;
+  } catch {
+    pathOnly = pathname.split('?')[0] || pathname;
+  }
+  if (isAnthropicMessagesPath(pathOnly)) return 'anthropic';
+  if (isOpenAIChatPath(pathOnly)) return 'openai-chat';
+  if (isOpenAIResponsesPath(pathOnly)) return 'openai-responses';
+  return undefined;
+}
+
+function emptyTransformInfo(reason: string): TransformInfo {
+  return {
+    compressed: false,
+    reason,
+    origChars: 0,
+    compressedChars: 0,
+    imageCount: 0,
+    imageBytes: 0,
+    staticChars: 0,
+    dynamicChars: 0,
+    dynamicBlockCount: 0,
+    droppedChars: 0,
+  };
+}
+
+async function transformOnlyResponse(
+  payload: TransformOnlyRequest,
+  opts: TransformOptions | undefined,
+): Promise<TransformOnlyResponse> {
+  let bodyIn: Uint8Array;
+  if (typeof payload.bodyBase64 === 'string') {
+    bodyIn = base64ToBytesLocal(payload.bodyBase64);
+  } else if ('body' in payload) {
+    bodyIn = new TextEncoder().encode(JSON.stringify(payload.body));
+  } else {
+    return {
+      protocol: 'pxpipe-transform-v1',
+      applied: false,
+      reason: 'bad_request',
+      detail: 'expected bodyBase64 or body',
+      bodyBase64: '',
+      info: emptyTransformInfo('bad_request: expected bodyBase64 or body'),
+    };
+  }
+
+  const provider = payload.provider ?? providerFromPath(payload.path ?? '/v1/messages');
+  if (!provider) {
+    return {
+      protocol: 'pxpipe-transform-v1',
+      applied: false,
+      reason: 'bad_request',
+      detail: 'unknown provider/path',
+      bodyBase64: bytesToBase64Local(bodyIn),
+      info: emptyTransformInfo('bad_request: unknown provider/path'),
+    };
+  }
+
+  const model = payload.model ?? readModelField(bodyIn);
+  const modelOk = provider === 'anthropic'
+    ? isPxpipeSupportedModel(model)
+    : isPxpipeSupportedGptModel(model);
+  const effectiveOpts = modelOk ? opts : { ...opts, compress: false };
+  const r = provider === 'anthropic'
+    ? await transformRequest(bodyIn, effectiveOpts)
+    : provider === 'openai-chat'
+      ? await transformOpenAIChatCompletions(bodyIn, effectiveOpts)
+      : await transformOpenAIResponses(bodyIn, effectiveOpts);
+  if (!modelOk) r.info.reason = 'unsupported_model';
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(r.body));
+  } catch {
+    parsed = undefined;
+  }
+  return {
+    protocol: 'pxpipe-transform-v1',
+    applied: r.info.compressed,
+    reason: r.info.compressed ? 'applied' : (r.info.reason ?? 'passthrough'),
+    detail: r.info.reason,
+    model: model ?? undefined,
+    bodyBase64: bytesToBase64Local(r.body),
+    ...(parsed !== undefined ? { body: parsed } : {}),
+    info: r.info,
+  };
+}
+
 function filterHeaders(src: Headers, strip: Set<string>): Headers {
   const out = new Headers();
   src.forEach((v, k) => {
@@ -635,6 +779,66 @@ export function createProxy(config: ProxyConfig = {}) {
     const t0 = Date.now();
     const url = new URL(req.url);
     const path = url.pathname + url.search;
+
+    // Hook/transform-only control plane. These endpoints never call upstream;
+    // Claude hooks can probe them opportunistically and fall back to the
+    // original request on any failure.
+    if (req.method === 'GET' && (url.pathname === '/healthz' || url.pathname === '/api/healthz')) {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'x-pxpipe-protocol': 'pxpipe-transform-v1',
+          'cache-control': 'no-store',
+        },
+      });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/transform') {
+      let payload: TransformOnlyRequest;
+      try {
+        payload = (await req.json()) as TransformOnlyRequest;
+      } catch (e) {
+        return jsonResponse({ error: 'bad_request', detail: (e as Error).message }, 400);
+      }
+      const transformOpts =
+        typeof config.transform === 'function' ? config.transform() : config.transform;
+      let out: TransformOnlyResponse;
+      try {
+        out = await transformOnlyResponse(payload, transformOpts);
+      } catch (e) {
+        return jsonResponse({ error: 'transform_error', detail: (e as Error).message }, 502);
+      }
+      if (out.reason === 'bad_request') return jsonResponse(out, 400);
+      void config.onRequest?.({
+        method: req.method,
+        path: url.pathname,
+        model: out.model,
+        status: 200,
+        durationMs: Date.now() - t0,
+        info: out.info,
+      });
+      return jsonResponse(out);
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/hook/usage') {
+      let payload: Record<string, unknown> = {};
+      try {
+        payload = (await req.json()) as Record<string, unknown>;
+      } catch (e) {
+        return jsonResponse({ error: 'bad_request', detail: (e as Error).message }, 400);
+      }
+      const usage = normalizeUsage(payload.usage);
+      void config.onRequest?.({
+        method: req.method,
+        path: url.pathname,
+        model: typeof payload.model === 'string' ? payload.model : undefined,
+        status: typeof payload.status === 'number' ? payload.status : 204,
+        durationMs: Date.now() - t0,
+        usage,
+        stopReason: typeof payload.stopReason === 'string' ? payload.stopReason : undefined,
+      });
+      return new Response(null, { status: 204 });
+    }
 
     // reqBodyBytes: kept for lazy gzip on 4xx. reqBodySha8: computed eagerly for correlation.
     let reqBodyBytes: Uint8Array | undefined;

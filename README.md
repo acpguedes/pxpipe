@@ -116,6 +116,17 @@ tokens and holds ≈92,000 chars, so text wins only above ~19 chars/token —
 Claude Code traffic runs ~1.91 (N=391). A per-request estimator decides;
 sparse prose stays text. Events log to `~/.pxpipe/events.jsonl`.
 
+## Hook transform mode (no upstream proxy)
+
+If your client can run a pre-request hook that mutates the outgoing body, pxpipe
+can run as a local transform-only daemon instead of sitting between the client
+and upstream. The hook checks `GET /healthz`; if pxpipe is unavailable it sends
+the original request unchanged. If pxpipe is available it posts the request body
+to `POST /api/transform`, receives the transformed body, and lets the client
+send that body to the original service endpoint. Optional post-response usage
+telemetry can be sent to `POST /api/hook/usage`. See
+[`docs/HOOK_TRANSFORM_MODE.md`](docs/HOOK_TRANSFORM_MODE.md).
+
 ## Library use (no proxy)
 
 ```ts
