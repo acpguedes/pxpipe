@@ -153,3 +153,16 @@ describe('stats aggregator', () => {
     expect(out).toMatch(/cache hit rate \(by events\):\s+50.0%/);
   });
 });
+
+describe('dropped-codepoint aggregation', () => {
+  it('aggregates top dropped codepoints for stats reports', () => {
+    const s = newSummary();
+    fold(s, ev({ dropped_chars: 3, dropped_codepoints_top: { 'U+1F600': 2, 'U+1F642': 1 } }));
+    fold(s, ev({ dropped_chars: 1, dropped_codepoints_top: { 'U+1F600': 1 } }));
+    expect(s.droppedCodepoints).toBe(4);
+    expect(s.droppedCodepointsTop.get('U+1F600')).toBe(3);
+    const out = renderTextReport(s);
+    expect(out).toContain('top dropped codepoints');
+    expect(out).toContain('U+1F600');
+  });
+});

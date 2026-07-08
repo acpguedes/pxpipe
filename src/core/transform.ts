@@ -1186,6 +1186,32 @@ function buildPagingMarker(args: {
   );
 }
 
+function pickMatchingLines(lines: readonly string[], re: RegExp, limit: number): string[] {
+  const out: string[] = [];
+  for (const line of lines) {
+    if (out.length >= limit) break;
+    if (re.test(line)) out.push(line);
+  }
+  return out;
+}
+
+function contentAwarePrelude(text: string, shape: 'structured' | 'log' | 'other', nlChar: string): string {
+  const lines = text.split(nlChar);
+  const kept: string[] = [];
+  if (shape === 'structured') {
+    kept.push(...pickMatchingLines(lines, /^\s*"?(?:error|errors|message|code|status|exception)"?\s*[:=]/i, 16));
+    kept.push(...pickMatchingLines(lines, /^\s*(?:diff --git |--- |\+\+\+ |@@ )/, 24));
+  } else if (shape === 'log') {
+    kept.push(...pickMatchingLines(lines, /\b(?:ERROR|FATAL|WARN|WARNING|Exception|Traceback|stack trace|Caused by:)\b/i, 48));
+  } else {
+    kept.push(...pickMatchingLines(lines, /^\s{0,3}#{1,6}\s+\S|^\s*[A-Z][^.!?]{3,80}:$/, 24));
+  }
+  const deduped = [...new Set(kept)].slice(0, 48);
+  return deduped.length > 0
+    ? `[ pxpipe retained high-signal lines from omitted content: ]${nlChar}${deduped.join(nlChar)}${nlChar}${nlChar}`
+    : '';
+}
+
 /** Truncate `text` so it renders to roughly `maxImages` images at the given
  *  `cols`. Picks head/tail split based on `classifyContent`. Budget measured
  *  in visual rows (what render.ts actually slices on). Returns the truncated
@@ -1213,6 +1239,7 @@ export function truncateForBudget(
   const lines = text.split(nlChar);
   const originalLines = lines.length;
   const originalChars = text.length;
+  const prelude = contentAwarePrelude(text, shape, nlChar);
 
   if (shape === 'structured') {
     let rows = 0;
@@ -1240,7 +1267,8 @@ export function truncateForBudget(
           shownTailLines: 0,
           omittedLines: originalLines - cut,
           omittedChars: omitted,
-        }),
+        }) +
+        prelude,
       omittedChars: omitted,
       truncated: true,
     };
@@ -1288,7 +1316,8 @@ export function truncateForBudget(
           shownTailLines: 0,
           omittedLines: originalLines - headCut,
           omittedChars: omitted,
-        }),
+        }) +
+        prelude,
       omittedChars: omitted,
       truncated: true,
     };
@@ -1309,6 +1338,7 @@ export function truncateForBudget(
         omittedLines: originalLines - headCut - (lines.length - tailStart),
         omittedChars: omitted,
       }) +
+      prelude +
       tailText,
     omittedChars: omitted,
     truncated: true,

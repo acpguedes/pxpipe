@@ -883,6 +883,7 @@ export class DashboardState {
       warnings: [
         ...((info?.unknownStaticTags ?? []).map((tag) => `unknown static tag <${tag}>`)),
         ...((info?.churningStaticTags ?? []).map((tag) => `churning static tag <${tag}>`)),
+        ...((info?.droppedChars ?? 0) > 0 ? [`dropped ${info?.droppedChars} glyphs; see dropped_codepoints_top telemetry`] : []),
       ],
     };
     this.recent.push(row);
@@ -1072,6 +1073,7 @@ export class DashboardState {
         warnings: [
           ...(((t as { unknown_static_tags?: string[] }).unknown_static_tags ?? []).map((tag) => `unknown static tag <${tag}>`)),
           ...(((t as { churning_static_tags?: string[] }).churning_static_tags ?? []).map((tag) => `churning static tag <${tag}>`)),
+          ...(((t as { dropped_chars?: number }).dropped_chars ?? 0) > 0 ? [`dropped ${(t as { dropped_chars?: number }).dropped_chars} glyphs; see dropped_codepoints_top telemetry`] : []),
         ],
       };
       this.recent.push(row);

@@ -42,6 +42,13 @@ export interface GptModelProfile {
   maxHeightPx: number;
 }
 
+export interface GptProfileValidationResult {
+  model: string;
+  known: boolean;
+  warnings: string[];
+  profile: GptModelProfile;
+}
+
 /** Default downscale-safe strip width (768px). Exported as the global cols default. */
 export const DEFAULT_GPT_STRIP_COLS = 152;
 
@@ -109,6 +116,10 @@ const BUILTIN_RULES: ProfileRule[] = [
 function resolveBuiltin(m: string): GptModelProfile {
   for (const rule of BUILTIN_RULES) if (rule.test(m)) return rule.profile;
   return DEFAULT_GPT_PROFILE;
+}
+
+function hasBuiltinProfile(m: string): boolean {
+  return BUILTIN_RULES.some((rule) => rule.test(m));
 }
 
 // --- env override (PXPIPE_GPT_PROFILES) -----------------------------------
@@ -183,4 +194,23 @@ export function resolveGptProfile(model: string | null | undefined): GptModelPro
     if (best) return best;
   }
   return resolveBuiltin(m);
+}
+
+/** Lightweight validation harness for adding/retuning model profiles. It checks
+ * the safety properties pxpipe relies on locally; OCR behavior still needs a
+ * provider-side smoke test with representative rendered pages. */
+export function validateGptModelProfile(model: string): GptProfileValidationResult {
+  const m = model.toLowerCase();
+  const profile = resolveGptProfile(m);
+  const known = hasBuiltinProfile(m) || [...envProfiles().keys()].some((k) => m.startsWith(k));
+  const warnings: string[] = [];
+  if (!known) warnings.push('generic fallback profile: keep passthrough unless explicitly enabled');
+  if (profile.stripCols <= 0) warnings.push('stripCols must be positive');
+  if (profile.maxHeightPx <= 0) warnings.push('maxHeightPx must be positive');
+  if (profile.vision.regime === 'tile') {
+    if (profile.vision.base <= 0 || profile.vision.perTile <= 0) warnings.push('tile cost fields must be positive');
+  } else if (profile.vision.multiplier <= 0 || profile.vision.patchCap <= 0) {
+    warnings.push('patch cost fields must be positive');
+  }
+  return { model, known, warnings, profile };
 }
